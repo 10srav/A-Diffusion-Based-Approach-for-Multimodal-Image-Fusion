@@ -129,6 +129,11 @@ output/*.jpeg
 *.temp
 .DS_Store
 Thumbs.db
+tmpclaude-*
+data/tno/
+data/roadscene_dataset/
+output/tno_*/
+output/test_*/
 
 # IDE
 .vscode/

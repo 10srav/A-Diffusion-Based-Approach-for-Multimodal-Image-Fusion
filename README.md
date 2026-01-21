@@ -6,7 +6,75 @@
 
 Implementation of **FusionINV** (IEEE TIP 2025) - a training-free method for infrared and visible image fusion using Stable Diffusion v1.5 inversion.
 
-## 🌟 Features
+## Architecture
+
+```
+                            FusionINV Pipeline
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                                                                 │
+    │   ┌─────────────┐         ┌─────────────┐                       │
+    │   │  Visible    │         │  Infrared   │                       │
+    │   │   Image     │         │   Image     │                       │
+    │   └──────┬──────┘         └──────┬──────┘                       │
+    │          │                       │                              │
+    │          ▼                       ▼                              │
+    │   ┌─────────────────────────────────────┐                       │
+    │   │          VAE Encoder                │                       │
+    │   │    (Image → Latent Space)           │                       │
+    │   └──────┬───────────────────────┬──────┘                       │
+    │          │                       │                              │
+    │          ▼                       ▼                              │
+    │   ┌─────────────┐         ┌─────────────────────────┐           │
+    │   │   DDIM      │         │    DDIM Inversion       │           │
+    │   │ Inversion   │────────▶│  + Visible Cues (λ)     │           │
+    │   │  (VIS)      │         │       (IR)              │           │
+    │   └──────┬──────┘         └───────────┬─────────────┘           │
+    │          │                            │                         │
+    │          │    ┌────────────────┐      │                         │
+    │          └───▶│ Feature Memory │◀─────┘                         │
+    │               │ (z_vis, z_inf) │                                │
+    │               └───────┬────────┘                                │
+    │                       │                                         │
+    │                       ▼                                         │
+    │   ┌─────────────────────────────────────────────────────────┐   │
+    │   │              Fusion Generation (DDIM)                   │   │
+    │   │  ┌─────────────────────────────────────────────────┐    │   │
+    │   │  │  Stage 1 (t > T1): IR Feature Injection         │    │   │
+    │   │  │  Stage 2 (T2 < t ≤ T1): VIS Feature Refinement  │    │   │
+    │   │  │  Stage 3 (t ≤ T2): CFG Denoising                │    │   │
+    │   │  └─────────────────────────────────────────────────┘    │   │
+    │   └─────────────────────────┬───────────────────────────────┘   │
+    │                             │                                   │
+    │                             ▼                                   │
+    │                   ┌─────────────────┐                           │
+    │                   │   VAE Decoder   │                           │
+    │                   └────────┬────────┘                           │
+    │                            │                                    │
+    │                            ▼                                    │
+    │                   ┌─────────────────┐                           │
+    │                   │  Fused Image    │                           │
+    │                   │ (Visible-Style) │                           │
+    │                   └─────────────────┘                           │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+
+    Key Components:
+    ├── VAE Encoder/Decoder: Stable Diffusion v1.5 VAE
+    ├── U-Net: Pre-trained SD v1.5 denoiser (frozen)
+    ├── CLIP Text Encoder: Optional text guidance
+    └── Feature Memory: Stores noise predictions for fusion
+```
+
+### How It Works
+
+1. **Visible Inversion**: The visible image is inverted through DDIM to capture its noise trajectory `z_vis`
+2. **Infrared Inversion with Visible Cues**: The infrared image is inverted with guidance from visible features (controlled by `λ`)
+3. **Multi-Stage Fusion**: During denoising:
+   - **Early Stage (t > T1=70)**: Inject IR structural features
+   - **Middle Stage (T2=40 < t ≤ T1)**: Refine with VIS appearance
+   - **Late Stage (t ≤ T2)**: Standard CFG denoising for detail enhancement
+
+## Features
 
 - **Training-Free**: Uses pre-trained Stable Diffusion v1.5 directly
 - **Visible-Style Output**: Produces fused images compatible with foundation models (SAM, Grounding DINO)
