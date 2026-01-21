@@ -9,70 +9,116 @@ Implementation of **FusionINV** (IEEE TIP 2025) - a training-free method for inf
 ## Architecture
 
 ```
-                            FusionINV Pipeline
-    ┌─────────────────────────────────────────────────────────────────┐
-    │                                                                 │
-    │   ┌─────────────┐         ┌─────────────┐                       │
-    │   │  Visible    │         │  Infrared   │                       │
-    │   │   Image     │         │   Image     │                       │
-    │   └──────┬──────┘         └──────┬──────┘                       │
-    │          │                       │                              │
-    │          ▼                       ▼                              │
-    │   ┌─────────────────────────────────────┐                       │
-    │   │          VAE Encoder                │                       │
-    │   │    (Image → Latent Space)           │                       │
-    │   └──────┬───────────────────────┬──────┘                       │
-    │          │                       │                              │
-    │          ▼                       ▼                              │
-    │   ┌─────────────┐         ┌─────────────────────────┐           │
-    │   │   DDIM      │         │    DDIM Inversion       │           │
-    │   │ Inversion   │────────▶│  + Visible Cues (λ)     │           │
-    │   │  (VIS)      │         │       (IR)              │           │
-    │   └──────┬──────┘         └───────────┬─────────────┘           │
-    │          │                            │                         │
-    │          │    ┌────────────────┐      │                         │
-    │          └───▶│ Feature Memory │◀─────┘                         │
-    │               │ (z_vis, z_inf) │                                │
-    │               └───────┬────────┘                                │
-    │                       │                                         │
-    │                       ▼                                         │
-    │   ┌─────────────────────────────────────────────────────────┐   │
-    │   │              Fusion Generation (DDIM)                   │   │
-    │   │  ┌─────────────────────────────────────────────────┐    │   │
-    │   │  │  Stage 1 (t > T1): IR Feature Injection         │    │   │
-    │   │  │  Stage 2 (T2 < t ≤ T1): VIS Feature Refinement  │    │   │
-    │   │  │  Stage 3 (t ≤ T2): CFG Denoising                │    │   │
-    │   │  └─────────────────────────────────────────────────┘    │   │
-    │   └─────────────────────────┬───────────────────────────────┘   │
-    │                             │                                   │
-    │                             ▼                                   │
-    │                   ┌─────────────────┐                           │
-    │                   │   VAE Decoder   │                           │
-    │                   └────────┬────────┘                           │
-    │                            │                                    │
-    │                            ▼                                    │
-    │                   ┌─────────────────┐                           │
-    │                   │  Fused Image    │                           │
-    │                   │ (Visible-Style) │                           │
-    │                   └─────────────────┘                           │
-    │                                                                 │
-    └─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         FusionINV Pipeline                                  │
+│                                                                             │
+│  ╔═══════════════════════════════════════════════════════════════════════╗  │
+│  ║                    TNO DATASET (RECOMMENDED)                          ║  │
+│  ║         Standard Benchmark for IR-VIS Image Fusion                    ║  │
+│  ║  ┌─────────────────────────┐    ┌─────────────────────────┐           ║  │
+│  ║  │      tno/vis/           │    │       tno/ir/           │           ║  │
+│  ║  │  ┌─────┐ ┌─────┐        │    │  ┌─────┐ ┌─────┐        │           ║  │
+│  ║  │  │.png │ │.png │ ...    │    │  │.png │ │.png │ ...    │           ║  │
+│  ║  │  └─────┘ └─────┘        │    │  └─────┘ └─────┘        │           ║  │
+│  ║  └───────────┬─────────────┘    └───────────┬─────────────┘           ║  │
+│  ╚══════════════╪══════════════════════════════╪═════════════════════════╝  │
+│                 │                              │                            │
+│                 ▼                              ▼                            │
+│       ┌─────────────────┐            ┌─────────────────┐                    │
+│       │  Visible Image  │            │  Infrared Image │                    │
+│       │   (RGB/Gray)    │            │   (Thermal)     │                    │
+│       └────────┬────────┘            └────────┬────────┘                    │
+│                │                              │                             │
+│                └──────────────┬───────────────┘                             │
+│                               ▼                                             │
+│                ┌──────────────────────────────┐                             │
+│                │        VAE Encoder           │                             │
+│                │   (Image → Latent 64×64×4)   │                             │
+│                └──────────────┬───────────────┘                             │
+│                               │                                             │
+│              ┌────────────────┴────────────────┐                            │
+│              ▼                                 ▼                            │
+│    ┌───────────────────┐            ┌────────────────────────┐              │
+│    │  DDIM Inversion   │            │   DDIM Inversion       │              │
+│    │     (VIS)         │───────────▶│  + Visible Cues (λ)    │              │
+│    │                   │  guidance  │        (IR)            │              │
+│    └─────────┬─────────┘            └───────────┬────────────┘              │
+│              │                                  │                           │
+│              │      ┌──────────────────┐        │                           │
+│              └─────▶│  Feature Memory  │◀───────┘                           │
+│                     │  ┌────────────┐  │                                    │
+│                     │  │ z_vis[t]   │  │                                    │
+│                     │  │ z_inf[t]   │  │                                    │
+│                     │  │ x_t_vis    │  │                                    │
+│                     │  │ x_t_inf    │  │                                    │
+│                     │  └────────────┘  │                                    │
+│                     └────────┬─────────┘                                    │
+│                              │                                              │
+│                              ▼                                              │
+│    ┌────────────────────────────────────────────────────────────────┐       │
+│    │                  FUSION GENERATION (DDIM)                      │       │
+│    │  ╔════════════════════════════════════════════════════════╗    │       │
+│    │  ║  STAGE 1 (t > T1=70): IR Feature Injection             ║    │       │
+│    │  ║  → Inject infrared structural/thermal features         ║    │       │
+│    │  ╠════════════════════════════════════════════════════════╣    │       │
+│    │  ║  STAGE 2 (T2=40 < t ≤ T1): VIS Feature Refinement      ║    │       │
+│    │  ║  → Blend visible appearance and texture details        ║    │       │
+│    │  ╠════════════════════════════════════════════════════════╣    │       │
+│    │  ║  STAGE 3 (t ≤ T2): CFG Denoising                       ║    │       │
+│    │  ║  → Classifier-free guidance for final refinement       ║    │       │
+│    │  ╚════════════════════════════════════════════════════════╝    │       │
+│    └─────────────────────────┬──────────────────────────────────────┘       │
+│                              │                                              │
+│                              ▼                                              │
+│                   ┌────────────────────┐                                    │
+│                   │    VAE Decoder     │                                    │
+│                   │ (Latent → Image)   │                                    │
+│                   └──────────┬─────────┘                                    │
+│                              │                                              │
+│                              ▼                                              │
+│                   ┌────────────────────┐                                    │
+│                   │    FUSED IMAGE     │                                    │
+│                   │  (Visible-Style)   │                                    │
+│                   │                    │                                    │
+│                   │ Compatible with:   │                                    │
+│                   │ • SAM, DINO, CLIP  │                                    │
+│                   │ • Object Detection │                                    │
+│                   │ • Segmentation     │                                    │
+│                   └────────────────────┘                                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 
-    Key Components:
-    ├── VAE Encoder/Decoder: Stable Diffusion v1.5 VAE
-    ├── U-Net: Pre-trained SD v1.5 denoiser (frozen)
-    ├── CLIP Text Encoder: Optional text guidance
-    └── Feature Memory: Stores noise predictions for fusion
+    REQUIRED COMPONENTS:
+    ├── Stable Diffusion v1.5 (VAE + U-Net + CLIP)
+    ├── TNO Dataset (Recommended benchmark for evaluation)
+    └── CUDA GPU (RTX 3090 recommended, ~21s inference)
+
+    KEY PARAMETERS:
+    ├── λ (lambda_vis) = 0.08  : Visible cues guidance strength
+    ├── T = 80                 : Total diffusion steps
+    ├── T1 = 70                : IR injection cutoff
+    └── T2 = 40                : VIS refinement cutoff
 ```
 
 ### How It Works
 
-1. **Visible Inversion**: The visible image is inverted through DDIM to capture its noise trajectory `z_vis`
-2. **Infrared Inversion with Visible Cues**: The infrared image is inverted with guidance from visible features (controlled by `λ`)
-3. **Multi-Stage Fusion**: During denoising:
-   - **Early Stage (t > T1=70)**: Inject IR structural features
-   - **Middle Stage (T2=40 < t ≤ T1)**: Refine with VIS appearance
-   - **Late Stage (t ≤ T2)**: Standard CFG denoising for detail enhancement
+1. **Input from TNO Dataset**: Load paired visible (RGB) and infrared (thermal) images from TNO benchmark dataset
+2. **Visible Inversion**: The visible image is inverted through DDIM to capture its noise trajectory `z_vis`
+3. **Infrared Inversion with Visible Cues**: The infrared image is inverted with guidance from visible features (controlled by `λ=0.08`)
+4. **Multi-Stage Fusion**: During denoising:
+   - **Stage 1 (t > T1=70)**: Inject IR structural/thermal features
+   - **Stage 2 (T2=40 < t ≤ T1)**: Refine with VIS appearance and texture
+   - **Stage 3 (t ≤ T2)**: CFG denoising for final detail enhancement
+5. **Output**: Visible-style fused image compatible with foundation models
+
+### Why TNO Dataset?
+
+| Reason | Description |
+|--------|-------------|
+| **Standard Benchmark** | Widely used for IR-VIS fusion evaluation |
+| **Paired Images** | Registered visible and infrared image pairs |
+| **Diverse Scenes** | Military, surveillance, outdoor scenarios |
+| **Ground Truth** | Enables quantitative comparison with SOTA methods |
 
 ## Features
 
