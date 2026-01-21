@@ -33,6 +33,7 @@ Implementation of **FusionINV** (IEEE TIP 2025) - a training-free method for inf
 │                               ▼                                             │
 │                ┌──────────────────────────────┐                             │
 │                │        VAE Encoder           │                             │
+│                │ (Variational Autoencoder)    │                             │
 │                │   (Image → Latent 64×64×4)   │                             │
 │                └──────────────┬───────────────┘                             │
 │                               │                                             │
@@ -72,6 +73,8 @@ Implementation of **FusionINV** (IEEE TIP 2025) - a training-free method for inf
 │                              ▼                                              │
 │                   ┌────────────────────┐                                    │
 │                   │    VAE Decoder     │                                    │
+│                   │(Variational Auto-  │                                    │
+│                   │ encoder Decoder)   │                                    │
 │                   │ (Latent → Image)   │                                    │
 │                   └──────────┬─────────┘                                    │
 │                              │                                              │
@@ -89,7 +92,10 @@ Implementation of **FusionINV** (IEEE TIP 2025) - a training-free method for inf
 └─────────────────────────────────────────────────────────────────────────────┘
 
     REQUIRED COMPONENTS:
-    ├── Stable Diffusion v1.5 (VAE + U-Net + CLIP)
+    ├── Stable Diffusion v1.5:
+    │   ├── VAE (Variational Autoencoder) - Image ↔ Latent encoding
+    │   ├── U-Net - Denoising network (frozen weights)
+    │   └── CLIP - Text encoder for optional guidance
     ├── TNO Dataset (Recommended benchmark for evaluation)
     └── CUDA GPU (RTX 3090 recommended, ~21s inference)
 
