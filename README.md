@@ -41,8 +41,10 @@ Implementation of **FusionINV** (IEEE TIP 2025) - a training-free method for inf
 │              ▼                                 ▼                            │
 │    ┌───────────────────┐            ┌────────────────────────┐              │
 │    │  DDIM Inversion   │            │   DDIM Inversion       │              │
-│    │     (VIS)         │───────────▶│  + Visible Cues (λ)    │              │
-│    │                   │  guidance  │        (IR)            │              │
+│    │  (Denoising       │            │  (Denoising Diffusion  │              │
+│    │   Diffusion       │───────────▶│   Implicit Models)     │              │
+│    │   Implicit Models)│  guidance  │  + Visible Cues (λ)    │              │
+│    │     (VIS)         │            │        (IR)            │              │
 │    └─────────┬─────────┘            └───────────┬────────────┘              │
 │              │                                  │                           │
 │              │      ┌──────────────────┐        │                           │
@@ -57,7 +59,8 @@ Implementation of **FusionINV** (IEEE TIP 2025) - a training-free method for inf
 │                              │                                              │
 │                              ▼                                              │
 │    ┌────────────────────────────────────────────────────────────────┐       │
-│    │                  FUSION GENERATION (DDIM)                      │       │
+│    │            FUSION GENERATION (DDIM Denoising)                  │       │
+│    │      (Denoising Diffusion Implicit Models - Sampling)          │       │
 │    │  ╔════════════════════════════════════════════════════════╗    │       │
 │    │  ║  STAGE 1 (t > T1=70): IR Feature Injection             ║    │       │
 │    │  ║  → Inject infrared structural/thermal features         ║    │       │
