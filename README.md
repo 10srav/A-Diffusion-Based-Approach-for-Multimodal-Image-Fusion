@@ -69,7 +69,7 @@ Implementation of **FusionINV** (IEEE TIP 2025) - a training-free method for inf
 │    │  ║  → Blend visible appearance and texture details        ║    │       │
 │    │  ╠════════════════════════════════════════════════════════╣    │       │
 │    │  ║  STAGE 3 (t ≤ T2): CFG Denoising                       ║    │       │
-│    │  ║  → Classifier-free guidance for final refinement       ║    │       │
+│    │  ║  → CFG (Classifier-Free Guidance) for final refinement ║    │       │
 │    │  ╚════════════════════════════════════════════════════════╝    │       │
 │    └─────────────────────────┬──────────────────────────────────────┘       │
 │                              │                                              │
