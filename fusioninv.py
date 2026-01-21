@@ -1,12 +1,14 @@
 """
 FusionINV: Main Pipeline
 Training-free multimodal image fusion using Stable Diffusion v1.5
+Supports TNO dataset processing
 """
 import os
 import argparse
 import torch
 from PIL import Image
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict
 from tqdm import tqdm
 
 # Diffusers imports
@@ -144,11 +146,14 @@ class FusionINV:
         prompt: str = "",
         guidance_scale: float = 7.5,
         seed: Optional[int] = None,
-        verbose: bool = True
+        verbose: bool = True,
+        preserve_color: bool = True,
+        color_strength: float = 0.7,
+        enhance_contrast: float = 1.2
     ) -> Image.Image:
         """
         Fuse visible and infrared images.
-        
+
         Args:
             vis_image_path: Path to visible image
             ir_image_path: Path to infrared image
@@ -156,7 +161,10 @@ class FusionINV:
             guidance_scale: CFG scale
             seed: Random seed for reproducibility
             verbose: Show progress
-            
+            preserve_color: Transfer color from visible image to output
+            color_strength: Color transfer strength (0-1)
+            enhance_contrast: Contrast enhancement factor (1.0 = no change)
+
         Returns:
             Fused PIL image
         """
@@ -215,7 +223,21 @@ class FusionINV:
         if verbose:
             print("\nDecoding fused latent to image...")
         fused_image = self.vae_encoder.decode(fused_latent)
-        
+
+        # Apply color preservation from visible image
+        if preserve_color:
+            if verbose:
+                print("Applying color transfer from visible image...")
+            fused_image = self.vae_encoder.transfer_color(
+                fused_image, vis_image, strength=color_strength
+            )
+
+        # Apply contrast enhancement
+        if enhance_contrast != 1.0:
+            if verbose:
+                print(f"Enhancing contrast (factor={enhance_contrast})...")
+            fused_image = self.vae_encoder.enhance_contrast(fused_image, enhance_contrast)
+
         return fused_image
     
     @torch.no_grad()
@@ -271,8 +293,105 @@ class FusionINV:
         
         # Decode
         converted_image = self.vae_encoder.decode(converted_latent)
-        
+
         return converted_image
+
+    def process_tno_dataset(
+        self,
+        tno_root: str,
+        output_dir: str,
+        vis_subdir: str = "vis",
+        ir_subdir: str = "ir",
+        prompt: str = "",
+        guidance_scale: float = 7.5,
+        seed: Optional[int] = None,
+        start_idx: int = 0,
+        end_idx: Optional[int] = None,
+        verbose: bool = True
+    ) -> List[Dict]:
+        """
+        Process TNO dataset batch.
+
+        Args:
+            tno_root: Path to TNO dataset root directory
+            output_dir: Output directory for fused images
+            vis_subdir: Subdirectory for visible images
+            ir_subdir: Subdirectory for infrared images
+            prompt: Text prompt for fusion
+            guidance_scale: CFG guidance scale
+            seed: Base random seed
+            start_idx: Starting index
+            end_idx: Ending index (None for all)
+            verbose: Show progress
+
+        Returns:
+            List of result dictionaries
+        """
+        from data.tno_dataset import TNODataset
+
+        # Create output directory
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Load dataset
+        if verbose:
+            print(f"Loading TNO dataset from: {tno_root}")
+
+        dataset = TNODataset(
+            root_dir=tno_root,
+            vis_subdir=vis_subdir,
+            ir_subdir=ir_subdir,
+            image_size=(512, 512)
+        )
+
+        total = len(dataset)
+        if end_idx is None:
+            end_idx = total
+        end_idx = min(end_idx, total)
+
+        if verbose:
+            print(f"Processing {end_idx - start_idx} image pairs")
+
+        results = []
+        iterator = range(start_idx, end_idx)
+        if verbose:
+            iterator = tqdm(iterator, desc="TNO Fusion")
+
+        for idx in iterator:
+            pair = dataset[idx]
+            name = pair['name']
+
+            current_seed = seed + idx if seed is not None else None
+
+            try:
+                fused = self.fuse(
+                    vis_image_path=pair['vis_path'],
+                    ir_image_path=pair['ir_path'],
+                    prompt=prompt,
+                    guidance_scale=guidance_scale,
+                    seed=current_seed,
+                    verbose=False
+                )
+
+                output_file = output_path / f"{name}_fused.png"
+                fused.save(output_file)
+
+                results.append({
+                    'name': name,
+                    'output': str(output_file),
+                    'success': True
+                })
+
+            except Exception as e:
+                if verbose:
+                    print(f"\nError processing {name}: {e}")
+                results.append({
+                    'name': name,
+                    'error': str(e),
+                    'success': False
+                })
+
+        return results
 
 
 def main():
@@ -280,19 +399,19 @@ def main():
     parser = argparse.ArgumentParser(
         description="FusionINV: Diffusion-Based Multimodal Image Fusion"
     )
-    
-    # Required arguments
+
+    # Image input arguments (either single pair or TNO dataset)
     parser.add_argument(
         "--vis_image_path",
         type=str,
-        required=True,
-        help="Path to visible image"
+        default=None,
+        help="Path to visible image (for single pair mode)"
     )
     parser.add_argument(
         "--ir_image_path",
         type=str,
-        required=True,
-        help="Path to infrared image"
+        default=None,
+        help="Path to infrared image (for single pair mode)"
     )
     parser.add_argument(
         "--output_path",
@@ -300,8 +419,40 @@ def main():
         required=True,
         help="Output directory"
     )
-    
-    # Optional arguments
+
+    # TNO dataset arguments
+    parser.add_argument(
+        "--tno_root",
+        type=str,
+        default=None,
+        help="Path to TNO dataset root (enables batch mode)"
+    )
+    parser.add_argument(
+        "--vis_subdir",
+        type=str,
+        default="vis",
+        help="Visible images subdirectory in TNO (default: vis)"
+    )
+    parser.add_argument(
+        "--ir_subdir",
+        type=str,
+        default="ir",
+        help="Infrared images subdirectory in TNO (default: ir)"
+    )
+    parser.add_argument(
+        "--start_idx",
+        type=int,
+        default=0,
+        help="Start index for TNO batch processing"
+    )
+    parser.add_argument(
+        "--end_idx",
+        type=int,
+        default=None,
+        help="End index for TNO batch processing"
+    )
+
+    # Model and processing arguments
     parser.add_argument(
         "--model_path",
         type=str,
@@ -356,12 +507,16 @@ def main():
         default="cuda",
         help="Device to use (cuda/cpu)"
     )
-    
+
     args = parser.parse_args()
-    
+
+    # Validate arguments
+    if args.tno_root is None and (args.vis_image_path is None or args.ir_image_path is None):
+        parser.error("Either --tno_root or both --vis_image_path and --ir_image_path are required")
+
     # Create output directory
     os.makedirs(args.output_path, exist_ok=True)
-    
+
     # Check CUDA availability
     if args.device == "cuda" and not torch.cuda.is_available():
         print("CUDA not available, falling back to CPU")
@@ -369,18 +524,18 @@ def main():
         dtype = torch.float32
     else:
         dtype = torch.bfloat16
-        
+
     # Initialize FusionINV
     print("=" * 60)
     print("FusionINV: Diffusion-Based Multimodal Image Fusion")
     print("=" * 60)
-    
+
     fusioninv = FusionINV(
         device=args.device,
         dtype=dtype,
         local_model_path=args.model_path
     )
-    
+
     # Set parameters
     fusioninv.set_params(
         lambda_vis=args.lambda_vis,
@@ -388,28 +543,58 @@ def main():
         T1=args.t1,
         T2=args.t2
     )
-    
-    # Run fusion
-    print("\n" + "=" * 60)
-    print("Starting fusion process...")
-    print("=" * 60)
-    
-    fused_image = fusioninv.fuse(
-        vis_image_path=args.vis_image_path,
-        ir_image_path=args.ir_image_path,
-        prompt=args.prompt,
-        guidance_scale=args.guidance_scale,
-        seed=args.seed,
-        verbose=True
-    )
-    
-    # Save output
-    output_file = os.path.join(args.output_path, "fused.png")
-    fused_image.save(output_file)
-    
-    print("\n" + "=" * 60)
-    print(f"Fusion complete! Output saved to: {output_file}")
-    print("=" * 60)
+
+    # TNO dataset batch mode
+    if args.tno_root is not None:
+        print("\n" + "=" * 60)
+        print("TNO Dataset Batch Processing Mode")
+        print("=" * 60)
+
+        results = fusioninv.process_tno_dataset(
+            tno_root=args.tno_root,
+            output_dir=args.output_path,
+            vis_subdir=args.vis_subdir,
+            ir_subdir=args.ir_subdir,
+            prompt=args.prompt,
+            guidance_scale=args.guidance_scale,
+            seed=args.seed,
+            start_idx=args.start_idx,
+            end_idx=args.end_idx,
+            verbose=True
+        )
+
+        # Summary
+        successful = sum(1 for r in results if r['success'])
+        failed = len(results) - successful
+
+        print("\n" + "=" * 60)
+        print(f"TNO Processing Complete!")
+        print(f"Successful: {successful}, Failed: {failed}")
+        print(f"Output directory: {args.output_path}")
+        print("=" * 60)
+
+    # Single pair mode
+    else:
+        print("\n" + "=" * 60)
+        print("Starting fusion process...")
+        print("=" * 60)
+
+        fused_image = fusioninv.fuse(
+            vis_image_path=args.vis_image_path,
+            ir_image_path=args.ir_image_path,
+            prompt=args.prompt,
+            guidance_scale=args.guidance_scale,
+            seed=args.seed,
+            verbose=True
+        )
+
+        # Save output
+        output_file = os.path.join(args.output_path, "fused.png")
+        fused_image.save(output_file)
+
+        print("\n" + "=" * 60)
+        print(f"Fusion complete! Output saved to: {output_file}")
+        print("=" * 60)
 
 
 if __name__ == "__main__":

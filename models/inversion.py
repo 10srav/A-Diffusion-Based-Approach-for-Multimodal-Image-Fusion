@@ -61,71 +61,74 @@ class DDPMInversion:
         verbose: bool = True
     ) -> Dict[int, Dict[str, torch.Tensor]]:
         """
-        Invert visible image to noise latent space.
-        Implements Eq. 5-7 from the paper.
-        
+        Invert visible image to noise latent space using DDIM inversion.
+        Goes from x_0 -> x_T by reversing the denoising process.
+
         Args:
             x_vis_0: Visible image latent (64×64×4)
             encoder_hidden_states: Text embeddings
             verbose: Show progress bar
-            
+
         Returns:
-            Feature memory with stored K, V, z at each timestep
+            Feature memory with stored features at each timestep
         """
-        # Set timesteps
+        # Set timesteps for denoising (T -> 0)
         self.scheduler.set_timesteps(self.num_inference_steps, device=self.device)
-        timesteps = self.scheduler.timesteps
-        
+        # Reverse for inversion (0 -> T)
+        timesteps = reversed(self.scheduler.timesteps)
+        timesteps_list = list(timesteps)
+
         # Initialize with encoded image
         x_vis_t = x_vis_0.clone()
-        
+
         # Clear previous memory
         self.feature_memory.clear()
-        
+
         # Progress bar
-        iterator = tqdm(timesteps, desc="Visible Inversion") if verbose else timesteps
-        
+        iterator = tqdm(timesteps_list, desc="Visible Inversion") if verbose else timesteps_list
+
         for i, t in enumerate(iterator):
+            t_val = t.item()
+
             # Get alpha values
-            alpha_bar_t = self._get_alpha_bar(t.item())
-            alpha_bar_prev = self._get_alpha_bar(t.item() - 1) if t.item() > 0 else 1.0
-            
-            # Predict noise (Eq. 5)
+            alpha_bar_t = self._get_alpha_bar(t_val)
+
+            # Predict noise using UNet
             noise_pred = self.unet(
                 x_vis_t,
                 t,
                 encoder_hidden_states=encoder_hidden_states,
                 return_dict=False
             )[0]
-            
-            # Predict x0 from noise
-            # P(f_t(x_t)) = (x_t - sqrt(1-alpha_bar_t) * f_t(x_t)) / sqrt(alpha_bar_t)
-            pred_x0 = (x_vis_t - (1 - alpha_bar_t) ** 0.5 * noise_pred) / (alpha_bar_t ** 0.5)
-            
-            # Direction pointing to x_t
-            # D(f_t(x_t)) = sqrt(1 - alpha_bar_{t-1} - sigma_t^2) * f_t(x_t)
-            sigma_t = self._get_sigma(t.item())
-            direction = ((1 - alpha_bar_prev - sigma_t ** 2) ** 0.5) * noise_pred
-            
-            # Compute mu (Eq. 5)
-            mu_vis_t = pred_x0 * (alpha_bar_prev ** 0.5) + direction
-            
-            # Compute z_vis (Eq. 6)
-            # z_vis_t = (sqrt(alpha_bar_{t-1}) * x_vis_0 + sqrt(1-alpha_bar_{t-1}) * eps - mu_vis_t) / sigma_t
-            noise = torch.randn_like(x_vis_t)
-            target = (alpha_bar_prev ** 0.5) * x_vis_0 + ((1 - alpha_bar_prev) ** 0.5) * noise
-            z_vis_t = (target - mu_vis_t) / (sigma_t + 1e-8)
-            
-            # Store in feature memory
-            self.feature_memory[t.item()] = {
-                'z_vis': z_vis_t.detach().clone(),
-                'mu_vis': mu_vis_t.detach().clone(),
+
+            # Predict x0 from current x_t and noise
+            pred_x0 = (x_vis_t - (1 - alpha_bar_t) ** 0.5 * noise_pred) / (alpha_bar_t ** 0.5 + 1e-8)
+
+            # Get next timestep (going forward in diffusion)
+            if i < len(timesteps_list) - 1:
+                next_t = timesteps_list[i + 1].item()
+                alpha_bar_next = self._get_alpha_bar(next_t)
+            else:
+                # Last step - use highest noise level
+                alpha_bar_next = self.scheduler.alphas_cumprod[-1].item()
+                next_t = len(self.scheduler.alphas_cumprod) - 1
+
+            # DDIM inversion: x_{t+1} = sqrt(alpha_bar_{t+1}) * pred_x0 + sqrt(1 - alpha_bar_{t+1}) * noise_pred
+            x_vis_next = (alpha_bar_next ** 0.5) * pred_x0 + ((1 - alpha_bar_next) ** 0.5) * noise_pred
+
+            # Store features for this timestep
+            self.feature_memory[t_val] = {
+                'z_vis': noise_pred.detach().clone(),
+                'x_t_vis': x_vis_t.detach().clone(),
                 'pred_x0_vis': pred_x0.detach().clone(),
             }
-            
-            # Update x_t for next step (Eq. 7)
-            x_vis_t = mu_vis_t + sigma_t * z_vis_t
-            
+
+            # Update for next iteration
+            x_vis_t = x_vis_next
+
+        # Store final noisy latent
+        self.final_latent_vis = x_vis_t.detach().clone()
+
         return self.feature_memory
     
     @torch.no_grad()
@@ -137,79 +140,81 @@ class DDPMInversion:
         verbose: bool = True
     ) -> Dict[int, Dict[str, torch.Tensor]]:
         """
-        Invert infrared image with visible cues guidance.
-        Implements Eq. 8-11 from the paper.
-        
+        Invert infrared image with visible cues guidance using DDIM inversion.
+
         Args:
             x_inf_0: Infrared image latent (64×64×4)
             encoder_hidden_states: Text embeddings
             lambda_vis: Visible cues strength (default: 0.08)
             verbose: Show progress bar
-            
+
         Returns:
             Updated feature memory with IR features
         """
         if not self.feature_memory:
             raise ValueError("Must run invert_visible first to get visible cues")
-            
-        # Set timesteps
+
+        # Set timesteps for denoising (T -> 0)
         self.scheduler.set_timesteps(self.num_inference_steps, device=self.device)
-        timesteps = self.scheduler.timesteps
-        
+        # Reverse for inversion (0 -> T)
+        timesteps = reversed(self.scheduler.timesteps)
+        timesteps_list = list(timesteps)
+
         # Initialize with encoded infrared image
         x_inf_t = x_inf_0.clone()
-        
+
         # Progress bar
-        iterator = tqdm(timesteps, desc="IR Inversion (Visible Guided)") if verbose else timesteps
-        
+        iterator = tqdm(timesteps_list, desc="IR Inversion (Visible Guided)") if verbose else timesteps_list
+
         for i, t in enumerate(iterator):
             t_val = t.item()
-            
+
             # Get alpha values
             alpha_bar_t = self._get_alpha_bar(t_val)
-            alpha_bar_prev = self._get_alpha_bar(t_val - 1) if t_val > 0 else 1.0
-            
+
             # Predict noise for infrared
-            noise_pred = self.unet(
+            noise_pred_inf = self.unet(
                 x_inf_t,
                 t,
                 encoder_hidden_states=encoder_hidden_states,
                 return_dict=False
             )[0]
-            
+
             # Predict x0 from noise
-            pred_x0 = (x_inf_t - (1 - alpha_bar_t) ** 0.5 * noise_pred) / (alpha_bar_t ** 0.5)
-            
-            # Direction pointing to x_t
-            sigma_t = self._get_sigma(t_val)
-            direction = ((1 - alpha_bar_prev - sigma_t ** 2) ** 0.5) * noise_pred
-            
-            # Compute mu_inf (same as visible)
-            mu_inf_t = pred_x0 * (alpha_bar_prev ** 0.5) + direction
-            
-            # Compute z_inf
-            noise = torch.randn_like(x_inf_t)
-            target = (alpha_bar_prev ** 0.5) * x_inf_0 + ((1 - alpha_bar_prev) ** 0.5) * noise
-            z_inf_t = (target - mu_inf_t) / (sigma_t + 1e-8)
-            
-            # Get visible cues (Eq. 8-11)
+            pred_x0 = (x_inf_t - (1 - alpha_bar_t) ** 0.5 * noise_pred_inf) / (alpha_bar_t ** 0.5 + 1e-8)
+
+            # Get visible noise prediction for guidance
             z_vis_t = self.feature_memory[t_val]['z_vis']
-            
-            # Apply visible cues guidance (Eq. 11)
-            # z_inf->vis = z_inf + lambda * z_vis
-            z_inf_vis_t = z_inf_t + lambda_vis * z_vis_t
-            
+
+            # Apply visible cues guidance to noise prediction
+            # Blend infrared noise with visible noise
+            noise_pred_guided = noise_pred_inf + lambda_vis * (z_vis_t - noise_pred_inf)
+
+            # Get next timestep (going forward in diffusion)
+            if i < len(timesteps_list) - 1:
+                next_t = timesteps_list[i + 1].item()
+                alpha_bar_next = self._get_alpha_bar(next_t)
+            else:
+                alpha_bar_next = self.scheduler.alphas_cumprod[-1].item()
+                next_t = len(self.scheduler.alphas_cumprod) - 1
+
+            # DDIM inversion with guided noise
+            x_inf_next = (alpha_bar_next ** 0.5) * pred_x0 + ((1 - alpha_bar_next) ** 0.5) * noise_pred_guided
+
             # Store infrared features
             self.feature_memory[t_val].update({
-                'z_inf': z_inf_t.detach().clone(),
-                'z_inf_vis': z_inf_vis_t.detach().clone(),
-                'mu_inf': mu_inf_t.detach().clone(),
+                'z_inf': noise_pred_inf.detach().clone(),
+                'z_inf_vis': noise_pred_guided.detach().clone(),
+                'x_t_inf': x_inf_t.detach().clone(),
                 'pred_x0_inf': pred_x0.detach().clone(),
             })
-            
-            # Update x_t with visible-guided noise
-            x_inf_t = mu_inf_t + sigma_t * z_inf_vis_t
-            
+
+            # Update for next iteration
+            x_inf_t = x_inf_next
+
+        # Store final noisy latent
+        self.final_latent_inf = x_inf_t.detach().clone()
+
         return self.feature_memory
     
     def get_inverted_latent(self, source: str = 'vis') -> Optional[torch.Tensor]:

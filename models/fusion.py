@@ -60,97 +60,128 @@ class FusionModule:
         encoder_hidden_states: torch.Tensor,
         encoder_hidden_states_uncond: torch.Tensor,
         guidance_scale: float = 7.5,
-        verbose: bool = True
+        verbose: bool = True,
+        start_latent: torch.Tensor = None
     ) -> torch.Tensor:
         """
-        Generate fused image using stored features.
-        Implements Eq. 12-14 from the paper.
-        
+        Generate fused image using stored features via DDIM denoising.
+        Fuses IR and VIS information during denoising.
+
         Args:
-            feature_memory: Stored K, V, z features from inversion
+            feature_memory: Stored features from inversion
             encoder_hidden_states: Conditional text embeddings
             encoder_hidden_states_uncond: Unconditional text embeddings
-            guidance_scale: CFG scale (default: 7.5, paper uses omega=2)
+            guidance_scale: CFG scale
             verbose: Show progress bar
-            
+            start_latent: Starting noisy latent (if None, uses stored)
+
         Returns:
             Fused image latent
         """
-        # Set timesteps
+        # Set timesteps (T -> 0 for denoising)
         self.scheduler.set_timesteps(self.T, device=self.device)
         timesteps = self.scheduler.timesteps
-        
-        # Get starting noise from visible latent (Eq. 12: z_fuse = z_vis)
-        last_step = max(feature_memory.keys())
-        z_vis_T = feature_memory[last_step].get('z_vis')
-        
-        if z_vis_T is None:
-            # Initialize with random noise if no visible features
-            latent_shape = (1, 4, 64, 64)
-            x_fuse = torch.randn(latent_shape, device=self.device, dtype=self.dtype)
+
+        # Get starting latent
+        if start_latent is not None:
+            x_fuse = start_latent.clone()
         else:
-            # Start with visible noise structure
-            mu_vis_T = feature_memory[last_step].get('mu_vis', torch.zeros_like(z_vis_T))
-            sigma_T = self._get_sigma(last_step)
-            x_fuse = mu_vis_T + sigma_T * z_vis_T
-        
+            # Use stored final latent from inversion
+            # Blend visible and infrared final latents
+            last_step = max(feature_memory.keys())
+            x_t_vis = feature_memory[last_step].get('x_t_vis')
+            x_t_inf = feature_memory[last_step].get('x_t_inf')
+
+            if x_t_vis is not None and x_t_inf is not None:
+                # Start with blend of both inverted latents
+                x_fuse = 0.5 * x_t_vis + 0.5 * x_t_inf
+            elif x_t_vis is not None:
+                x_fuse = x_t_vis.clone()
+            elif x_t_inf is not None:
+                x_fuse = x_t_inf.clone()
+            else:
+                # Fallback to random noise
+                latent_shape = (1, 4, 64, 64)
+                x_fuse = torch.randn(latent_shape, device=self.device, dtype=self.dtype)
+
         # Progress bar
         iterator = tqdm(timesteps, desc="Fusion Generation") if verbose else timesteps
-        
+
         for i, t in enumerate(iterator):
             t_val = t.item()
-            
-            # Apply fusion rule (Eq. 13)
+
+            # Apply fusion rule based on timestep
             fusion_stage = self._get_fusion_stage(t_val)
-            
-            # Get z for this step based on fusion stage (Eq. 12)
-            z_fuse = self._get_fused_z(t_val, feature_memory, fusion_stage)
-            
-            # Classifier-free guidance (Eq. 14)
-            # f_t(x) = omega * f_t(x, C, Att_fuse) + (1 - omega) * f_t(x, C, empty)
-            
-            # Conditional forward pass
+
+            # Classifier-free guidance
             noise_pred_cond = self.unet(
                 x_fuse,
                 t,
                 encoder_hidden_states=encoder_hidden_states,
                 return_dict=False
             )[0]
-            
-            # Unconditional forward pass
+
             noise_pred_uncond = self.unet(
                 x_fuse,
                 t,
                 encoder_hidden_states=encoder_hidden_states_uncond,
                 return_dict=False
             )[0]
-            
-            # Apply CFG (simplified version of Eq. 14)
-            noise_pred = noise_pred_uncond + self.omega * (noise_pred_cond - noise_pred_uncond)
-            
+
+            # CFG: noise = uncond + guidance_scale * (cond - uncond)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+            # Inject stored features based on fusion stage
+            if t_val in feature_memory:
+                stored_noise = self._get_fused_noise(t_val, feature_memory, fusion_stage)
+                if stored_noise is not None:
+                    # Blend predicted noise with stored noise
+                    blend_weight = 0.3 if fusion_stage == 'ir' else 0.2 if fusion_stage == 'vis' else 0.0
+                    noise_pred = (1 - blend_weight) * noise_pred + blend_weight * stored_noise
+
             # Get alpha values
             alpha_bar_t = self._get_alpha_bar(t_val)
-            alpha_bar_prev = self._get_alpha_bar(t_val - 1) if t_val > 0 else 1.0
-            
-            # Predict x0
-            pred_x0 = (x_fuse - (1 - alpha_bar_t) ** 0.5 * noise_pred) / (alpha_bar_t ** 0.5)
-            
-            # Compute direction
-            sigma_t = self._get_sigma(t_val)
-            direction = ((1 - alpha_bar_prev - sigma_t ** 2) ** 0.5) * noise_pred
-            
-            # Compute mu
-            mu_fuse = pred_x0 * (alpha_bar_prev ** 0.5) + direction
-            
-            # Update x_fuse with fused z
-            if z_fuse is not None:
-                x_fuse = mu_fuse + sigma_t * z_fuse
+
+            # Get previous timestep
+            if i < len(timesteps) - 1:
+                prev_t = timesteps[i + 1].item()
+                alpha_bar_prev = self._get_alpha_bar(prev_t)
             else:
-                # Use random noise if no stored z
-                z_random = torch.randn_like(x_fuse)
-                x_fuse = mu_fuse + sigma_t * z_random
-                
+                alpha_bar_prev = 1.0
+
+            # Predict x0
+            pred_x0 = (x_fuse - (1 - alpha_bar_t) ** 0.5 * noise_pred) / (alpha_bar_t ** 0.5 + 1e-8)
+
+            # Clamp pred_x0 for stability
+            pred_x0 = torch.clamp(pred_x0, -10, 10)
+
+            # DDIM step: x_{t-1} = sqrt(alpha_bar_{t-1}) * pred_x0 + sqrt(1 - alpha_bar_{t-1}) * noise_pred
+            x_fuse = (alpha_bar_prev ** 0.5) * pred_x0 + ((1 - alpha_bar_prev) ** 0.5) * noise_pred
+
         return x_fuse
+
+    def _get_fused_noise(
+        self,
+        t: int,
+        feature_memory: Dict,
+        stage: str
+    ) -> Optional[torch.Tensor]:
+        """
+        Get appropriate stored noise based on fusion stage.
+        """
+        if t not in feature_memory:
+            return None
+
+        mem = feature_memory[t]
+
+        if stage == 'ir':
+            # Use infrared noise (with visible guidance)
+            return mem.get('z_inf_vis', mem.get('z_inf'))
+        elif stage == 'vis':
+            # Use visible noise
+            return mem.get('z_vis')
+        else:
+            return None
     
     def _get_fusion_stage(self, t: int) -> str:
         """

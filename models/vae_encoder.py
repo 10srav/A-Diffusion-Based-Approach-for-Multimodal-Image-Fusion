@@ -1,12 +1,14 @@
 """
 VAE Encoder/Decoder for Stable Diffusion
 Converts images to/from latent space (512×512 → 64×64×4)
+Includes color preservation utilities
 """
 import torch
 import torch.nn as nn
 from PIL import Image
 import numpy as np
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional
+import colorsys
 
 
 class VAEEncoder:
@@ -133,12 +135,107 @@ class VAEEncoder:
     def resize_image(self, image: Image.Image, size: Tuple[int, int] = (512, 512)) -> Image.Image:
         """
         Resize image to target size.
-        
+
         Args:
             image: Input PIL image
             size: Target size (width, height)
-            
+
         Returns:
             Resized PIL image
         """
         return image.resize(size, Image.LANCZOS)
+
+    def transfer_color(
+        self,
+        fused_image: Image.Image,
+        visible_image: Image.Image,
+        strength: float = 0.7
+    ) -> Image.Image:
+        """
+        Transfer color from visible image to fused image using LAB color space.
+        Preserves luminance from fused image, takes color from visible.
+
+        Args:
+            fused_image: Fused grayscale/desaturated image
+            visible_image: Original visible image for color reference
+            strength: Color transfer strength (0-1)
+
+        Returns:
+            Color-enhanced fused image
+        """
+        # Ensure same size
+        if fused_image.size != visible_image.size:
+            visible_image = visible_image.resize(fused_image.size, Image.LANCZOS)
+
+        # Convert to numpy arrays
+        fused_np = np.array(fused_image).astype(np.float32) / 255.0
+        vis_np = np.array(visible_image).astype(np.float32) / 255.0
+
+        # Convert RGB to YCbCr-like space for color transfer
+        # Y = luminance, Cb/Cr = chrominance
+        def rgb_to_ycbcr(img):
+            y = 0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]
+            cb = 0.564 * (img[..., 2] - y)
+            cr = 0.713 * (img[..., 0] - y)
+            return y, cb, cr
+
+        def ycbcr_to_rgb(y, cb, cr):
+            r = y + 1.402 * cr
+            g = y - 0.344 * cb - 0.714 * cr
+            b = y + 1.772 * cb
+            return np.stack([r, g, b], axis=-1)
+
+        # Get luminance from fused, color from visible
+        fused_y, fused_cb, fused_cr = rgb_to_ycbcr(fused_np)
+        vis_y, vis_cb, vis_cr = rgb_to_ycbcr(vis_np)
+
+        # Blend chrominance channels
+        blended_cb = strength * vis_cb + (1 - strength) * fused_cb
+        blended_cr = strength * vis_cr + (1 - strength) * fused_cr
+
+        # Reconstruct with fused luminance and blended color
+        result = ycbcr_to_rgb(fused_y, blended_cb, blended_cr)
+
+        # Clip and convert back
+        result = np.clip(result, 0, 1)
+        result = (result * 255).astype(np.uint8)
+
+        return Image.fromarray(result)
+
+    def enhance_contrast(
+        self,
+        image: Image.Image,
+        factor: float = 1.2
+    ) -> Image.Image:
+        """
+        Enhance contrast of image.
+
+        Args:
+            image: Input image
+            factor: Contrast enhancement factor (>1 increases contrast)
+
+        Returns:
+            Contrast-enhanced image
+        """
+        from PIL import ImageEnhance
+        enhancer = ImageEnhance.Contrast(image)
+        return enhancer.enhance(factor)
+
+    def adjust_brightness(
+        self,
+        image: Image.Image,
+        factor: float = 1.1
+    ) -> Image.Image:
+        """
+        Adjust brightness of image.
+
+        Args:
+            image: Input image
+            factor: Brightness factor (>1 increases brightness)
+
+        Returns:
+            Brightness-adjusted image
+        """
+        from PIL import ImageEnhance
+        enhancer = ImageEnhance.Brightness(image)
+        return enhancer.enhance(factor)

@@ -26,7 +26,7 @@ pip install -r requirements.txt
 
 ## 🚀 Quick Start
 
-### Command Line
+### Single Image Pair
 ```bash
 python fusioninv.py \
     --vis_image_path ./data/sample_vis.png \
@@ -35,10 +35,52 @@ python fusioninv.py \
     --seed 42
 ```
 
+### TNO Dataset Batch Processing
+```bash
+# Process entire TNO dataset
+python fusioninv.py \
+    --tno_root ./data/tno \
+    --output_path ./output/tno_results \
+    --seed 42
+
+# Process specific range
+python fusioninv.py \
+    --tno_root ./data/tno \
+    --output_path ./output/tno_results \
+    --start_idx 0 \
+    --end_idx 10 \
+    --seed 42
+```
+
+### Alternative: Dedicated TNO Script
+```bash
+python process_tno.py \
+    --tno_root ./data/tno \
+    --output_dir ./output/tno_results
+```
+
 ### Streamlit Demo
 ```bash
 streamlit run app.py
 ```
+
+## 📥 TNO Dataset Setup
+
+1. Download TNO dataset from [Figshare](https://figshare.com/articles/dataset/TNO_Image_Fusion_Dataset/1008029)
+2. Organize the dataset:
+```
+data/tno/
+├── vis/           # Visible images
+│   ├── image1.png
+│   ├── image2.png
+│   └── ...
+└── ir/            # Infrared images (matching filenames)
+    ├── image1.png
+    ├── image2.png
+    └── ...
+```
+
+The loader auto-detects common directory names: `vis`/`VIS`/`visible`/`RGB` and `ir`/`IR`/`infrared`/`thermal`.
 
 ## 📂 Project Structure
 
@@ -49,9 +91,12 @@ FusionINV/
 │   ├── inversion.py          # DDPM inversion with visible cues
 │   ├── attention_hooks.py    # Self-attention K,V extraction
 │   └── fusion.py             # Appearance injection module
-├── data/                     # Sample IR/VIS pairs
+├── data/
+│   ├── tno_dataset.py        # TNO dataset loader
+│   └── tno/                  # TNO dataset (user-provided)
 ├── output/                   # Generated outputs
 ├── fusioninv.py              # Main pipeline
+├── process_tno.py            # TNO batch processing script
 ├── app.py                    # Streamlit demo
 ├── requirements.txt
 └── README.md
@@ -59,13 +104,23 @@ FusionINV/
 
 ## ⚙️ Parameters
 
+### Fusion Parameters
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--lambda_vis` | 0.08 | Visible cues guidance strength |
 | `--num_steps` | 80 | Total diffusion steps |
 | `--t1` | 70 | IR injection cutoff step |
 | `--t2` | 40 | VIS refinement cutoff step |
-| `--guidance_scale` | 2.0 | Classifier-free guidance scale |
+| `--guidance_scale` | 7.5 | Classifier-free guidance scale |
+
+### TNO Dataset Parameters
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--tno_root` | None | Path to TNO dataset root |
+| `--vis_subdir` | vis | Visible images subdirectory |
+| `--ir_subdir` | ir | Infrared images subdirectory |
+| `--start_idx` | 0 | Start index for batch processing |
+| `--end_idx` | None | End index (None for all images) |
 
 ## 📌 Citation
 
