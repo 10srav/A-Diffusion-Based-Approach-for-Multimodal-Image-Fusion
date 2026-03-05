@@ -16,14 +16,15 @@ opencv-python>=4.8.0
 # HuggingFace
 huggingface_hub>=0.16.0
 
-# Web demo
-streamlit>=1.25.0
-
 # Utilities
 tqdm>=4.65.0
 einops>=0.6.1
 safetensors>=0.3.0
 
-# Optional: metrics
-# lpips>=0.1.4
-# pytorch-fid>=0.3.0
+# Quality metrics
+scikit-image>=0.21.0
+scipy>=1.10.0
+sewar>=0.4.6
+
+# Google Drive download
+gdown>=4.7.0
