@@ -15,34 +15,30 @@ sys.path.insert(0, PROJECT_ROOT)
 
 def run_all(
     source_dir: str,
-    model_path: str = None,
     device: str = "cuda",
     num_train: int = 200,
     num_test: int = 100,
-    lambda_vis: float = 0.08,
-    num_steps: int = 80,
-    t1: int = 70,
-    t2: int = 40,
-    guidance_scale: float = 7.5,
+    epochs: int = 100,
+    batch_size: int = 4,
+    lr: float = 1e-4,
+    ddim_steps: int = 50,
     seed: int = 42,
     skip_setup: bool = False,
     skip_train: bool = False,
-    skip_test: bool = False
+    skip_test: bool = False,
 ):
     """
     Run complete pipeline: Setup -> Training -> Testing.
 
     Args:
         source_dir: Path to M3FD dataset (containing Ir/ and Vis/)
-        model_path: Optional local path to SD v1.5 model
         device: Device (cuda/cpu)
         num_train: Training images count
         num_test: Test images count
-        lambda_vis: Visible cues strength
-        num_steps: Diffusion steps
-        t1: IR injection cutoff
-        t2: VIS refinement cutoff
-        guidance_scale: CFG scale
+        epochs: Training epochs
+        batch_size: Training batch size
+        lr: Learning rate
+        ddim_steps: DDIM sampling steps for testing
         seed: Random seed
         skip_setup: Skip dataset setup
         skip_train: Skip training phase
@@ -55,13 +51,14 @@ def run_all(
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
     print(f"  Dataset:     M3FD")
-    print(f"  Train:       {num_train} images")
+    print(f"  Train:       {num_train} images, {epochs} epochs")
     print(f"  Test:        {num_test} images")
     print(f"  Device:      {device}")
     print(f"  Source:      {source_dir}")
     print("=" * 60)
 
     data_dir = os.path.join(PROJECT_ROOT, "data", "m3fd")
+    checkpoint_dir = os.path.join(PROJECT_ROOT, "checkpoints")
 
     # ==================== STEP 1: SETUP ====================
     if not skip_setup:
@@ -80,9 +77,6 @@ def run_all(
     else:
         print("\n[Skipping setup - using existing split]")
 
-    train_results, train_failed = [], []
-    test_metrics, avg_metrics = [], {}
-
     # ==================== STEP 2: TRAINING ====================
     if not skip_train:
         print("\n" + "=" * 60)
@@ -90,22 +84,22 @@ def run_all(
         print("=" * 60)
 
         from run_train import run_training
-        train_results, train_failed = run_training(
+        run_training(
             data_dir=os.path.join(data_dir, "train"),
-            output_dir=os.path.join(PROJECT_ROOT, "output", "train_results"),
-            model_path=model_path,
+            output_dir=os.path.join(PROJECT_ROOT, "output", "training"),
+            checkpoint_dir=checkpoint_dir,
             device=device,
-            lambda_vis=lambda_vis,
-            num_steps=num_steps,
-            t1=t1,
-            t2=t2,
-            guidance_scale=guidance_scale,
-            seed=seed
+            epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            seed=seed,
         )
     else:
         print("\n[Skipping training phase]")
 
     # ==================== STEP 3: TESTING ====================
+    test_metrics, avg_metrics = [], {}
+
     if not skip_test:
         print("\n" + "=" * 60)
         print("STEP 3/3: TESTING PHASE")
@@ -115,14 +109,10 @@ def run_all(
         test_metrics, avg_metrics = run_testing(
             data_dir=os.path.join(data_dir, "test"),
             output_dir=os.path.join(PROJECT_ROOT, "output", "test_results"),
-            model_path=model_path,
+            checkpoint=os.path.join(checkpoint_dir, "best.pt"),
             device=device,
-            lambda_vis=lambda_vis,
-            num_steps=num_steps,
-            t1=t1,
-            t2=t2,
-            guidance_scale=guidance_scale,
-            seed=seed
+            ddim_steps=ddim_steps,
+            seed=seed,
         )
     else:
         print("\n[Skipping testing phase]")
@@ -138,11 +128,12 @@ def run_all(
     print("=" * 60)
     print(f"  Total time: {hours}h {minutes}m {seconds}s")
     print(f"  Output directory: {os.path.join(PROJECT_ROOT, 'output')}")
-    print(f"    ├── train_results/   (200 fused training images)")
+    print(f"    ├── training/        (training samples & logs)")
     print(f"    └── test_results/    (100 fused test images + metrics)")
     print(f"        ├── fused/           (fused images)")
     print(f"        ├── test_metrics.csv (per-image metrics)")
     print(f"        └── test_summary.json (average metrics)")
+    print(f"  Checkpoints: {checkpoint_dir}")
     print("=" * 60)
 
 
@@ -152,24 +143,20 @@ def main():
     )
     parser.add_argument("--source_dir", type=str, required=True,
                         help="Path to M3FD dataset (containing Ir/ and Vis/)")
-    parser.add_argument("--model_path", type=str, default=None,
-                        help="Local path to SD v1.5 model")
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device: cuda or cpu")
     parser.add_argument("--num_train", type=int, default=200,
                         help="Training images (default: 200)")
     parser.add_argument("--num_test", type=int, default=100,
                         help="Test images (default: 100)")
-    parser.add_argument("--lambda_vis", type=float, default=0.08,
-                        help="Visible cues strength")
-    parser.add_argument("--num_steps", type=int, default=80,
-                        help="Diffusion steps")
-    parser.add_argument("--t1", type=int, default=70,
-                        help="IR injection cutoff")
-    parser.add_argument("--t2", type=int, default=40,
-                        help="VIS refinement cutoff")
-    parser.add_argument("--guidance_scale", type=float, default=7.5,
-                        help="CFG scale")
+    parser.add_argument("--epochs", type=int, default=100,
+                        help="Training epochs (default: 100)")
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Training batch size (default: 4)")
+    parser.add_argument("--lr", type=float, default=1e-4,
+                        help="Learning rate (default: 1e-4)")
+    parser.add_argument("--ddim_steps", type=int, default=50,
+                        help="DDIM sampling steps for testing (default: 50)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
     parser.add_argument("--skip_setup", action="store_true",
@@ -183,19 +170,17 @@ def main():
 
     run_all(
         source_dir=args.source_dir,
-        model_path=args.model_path,
         device=args.device,
         num_train=args.num_train,
         num_test=args.num_test,
-        lambda_vis=args.lambda_vis,
-        num_steps=args.num_steps,
-        t1=args.t1,
-        t2=args.t2,
-        guidance_scale=args.guidance_scale,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        ddim_steps=args.ddim_steps,
         seed=args.seed,
         skip_setup=args.skip_setup,
         skip_train=args.skip_train,
-        skip_test=args.skip_test
+        skip_test=args.skip_test,
     )
 
 

@@ -9,7 +9,10 @@ import shutil
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 from PIL import Image
+import torch
 from torch.utils.data import Dataset
+import torchvision.transforms as transforms
+import torchvision.transforms.functional as TF
 
 
 class M3FDDataset(Dataset):
@@ -147,6 +150,139 @@ class M3FDDataset(Dataset):
 
     def get_all_names(self) -> List[str]:
         return [p[0].stem for p in self.image_pairs]
+
+
+class M3FDTrainDataset(Dataset):
+    """
+    M3FD Dataset for training the Adaptive Diffusion Model.
+    Returns tensors at 256x256 with data augmentation and pseudo GT.
+    """
+
+    SUPPORTED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
+
+    def __init__(
+        self,
+        root_dir: str,
+        image_size: Tuple[int, int] = (256, 256),
+        augment: bool = True,
+    ):
+        self.root_dir = Path(root_dir)
+        self.image_size = image_size
+        self.augment = augment
+
+        # Auto-detect structure
+        subdirs = [d.name for d in self.root_dir.iterdir() if d.is_dir()]
+        subdirs_lower = {d.lower(): d for d in subdirs}
+
+        vis_name = None
+        ir_name = None
+        for p in ['vis', 'visible', 'rgb', 'vi']:
+            if p in subdirs_lower:
+                vis_name = subdirs_lower[p]
+                break
+        for p in ['ir', 'infrared', 'thermal', 'lwir', 'nir']:
+            if p in subdirs_lower:
+                ir_name = subdirs_lower[p]
+                break
+
+        self.vis_dir = self.root_dir / (vis_name or "vis")
+        self.ir_dir = self.root_dir / (ir_name or "ir")
+
+        self.image_pairs = self._find_image_pairs()
+        print(f"M3FD Train Dataset: {len(self.image_pairs)} pairs (augment={augment})")
+
+    def _find_image_pairs(self) -> List[Tuple[Path, Path]]:
+        vis_images = {}
+        for ext in self.SUPPORTED_EXTENSIONS:
+            for f in self.vis_dir.glob(f"*{ext}"):
+                vis_images[f.stem.lower()] = f
+            for f in self.vis_dir.glob(f"*{ext.upper()}"):
+                vis_images[f.stem.lower()] = f
+
+        ir_images = {}
+        for ext in self.SUPPORTED_EXTENSIONS:
+            for f in self.ir_dir.glob(f"*{ext}"):
+                ir_images[f.stem.lower()] = f
+            for f in self.ir_dir.glob(f"*{ext.upper()}"):
+                ir_images[f.stem.lower()] = f
+
+        pairs = [(vis_images[n], ir_images[n]) for n in vis_images if n in ir_images]
+        pairs.sort(key=lambda x: x[0].stem.lower())
+        return pairs
+
+    def __len__(self) -> int:
+        return len(self.image_pairs)
+
+    def __getitem__(self, idx: int) -> Dict:
+        vis_path, ir_path = self.image_pairs[idx]
+
+        vis = Image.open(vis_path).convert('RGB')
+        ir = Image.open(ir_path).convert('RGB')
+
+        if self.augment:
+            # Random horizontal flip (same for both)
+            if random.random() > 0.5:
+                vis = TF.hflip(vis)
+                ir = TF.hflip(ir)
+
+            # Random vertical flip
+            if random.random() > 0.5:
+                vis = TF.vflip(vis)
+                ir = TF.vflip(ir)
+
+            # Random rotation (same angle)
+            angle = random.uniform(-10, 10)
+            vis = TF.rotate(vis, angle)
+            ir = TF.rotate(ir, angle)
+
+            # Random crop (resize larger, then crop)
+            resize_size = int(self.image_size[0] * 1.125)  # 288
+            vis = TF.resize(vis, [resize_size, resize_size])
+            ir = TF.resize(ir, [resize_size, resize_size])
+            i, j, h, w = transforms.RandomCrop.get_params(
+                vis, output_size=self.image_size
+            )
+            vis = TF.crop(vis, i, j, h, w)
+            ir = TF.crop(ir, i, j, h, w)
+        else:
+            vis = TF.resize(vis, list(self.image_size))
+            ir = TF.resize(ir, list(self.image_size))
+
+        # To tensor [-1, 1]
+        vis_tensor = TF.normalize(TF.to_tensor(vis), [0.5] * 3, [0.5] * 3)
+        ir_tensor = TF.normalize(TF.to_tensor(ir), [0.5] * 3, [0.5] * 3)
+
+        # Create pseudo ground truth
+        gt_fused = self._create_pseudo_gt(ir_tensor, vis_tensor)
+
+        return {
+            'vis': vis_tensor,
+            'ir': ir_tensor,
+            'gt_fused': gt_fused,
+            'name': vis_path.stem
+        }
+
+    @staticmethod
+    def _create_pseudo_gt(ir_tensor, vis_tensor):
+        """Max-luminance fusion + visible color preservation."""
+        ir_01 = (ir_tensor + 1) / 2
+        vis_01 = (vis_tensor + 1) / 2
+
+        ir_y = 0.299 * ir_01[0:1] + 0.587 * ir_01[1:2] + 0.114 * ir_01[2:3]
+        vis_y = 0.299 * vis_01[0:1] + 0.587 * vis_01[1:2] + 0.114 * vis_01[2:3]
+
+        fused_y = torch.max(ir_y, vis_y)
+
+        vis_cb = vis_01[2:3] - vis_y
+        vis_cr = vis_01[0:1] - vis_y
+
+        fused_r = fused_y + vis_cr
+        fused_g = fused_y - 0.344136 * vis_cb - 0.714136 * vis_cr
+        fused_b = fused_y + vis_cb
+
+        fused = torch.cat([fused_r, fused_g, fused_b], dim=0)
+        fused = torch.clamp(fused, 0, 1)
+        return fused * 2 - 1
 
 
 def split_m3fd_dataset(

@@ -1,240 +1,279 @@
 """
-Training Script for M3FD Dataset
-Processes 200 training images using the Adaptive Diffusion Fusion model.
+Training Script for Adaptive Diffusion Fusion Model
+Trains the model on M3FD dataset (200 training pairs).
 Run from command line: python run_train.py
 """
 import os
 import sys
+import copy
 import argparse
 import torch
 import json
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
+from torch.utils.data import DataLoader
 
-# Add project root to path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
-from fusioninv import FusionINV
-from data.m3fd_dataset import M3FDDataset
+from models.adaptive_fusion_net import AdaptiveFusionModel
+from models.adaptive_diffusion import GaussianDiffusion
+from data.m3fd_dataset import M3FDTrainDataset
 
 
-def run_training(
-    data_dir: str = None,
-    output_dir: str = None,
-    model_path: str = None,
-    device: str = "cuda",
-    lambda_vis: float = 0.08,
-    num_steps: int = 80,
-    t1: int = 70,
-    t2: int = 40,
-    guidance_scale: float = 7.5,
-    seed: int = 42,
-    start_idx: int = 0,
-    end_idx: int = None
-):
-    """
-    Process M3FD training set (200 images) with adaptive diffusion fusion.
+def update_ema(ema_model, model, decay=0.9999):
+    """Update exponential moving average model."""
+    with torch.no_grad():
+        for ema_p, p in zip(ema_model.parameters(), model.parameters()):
+            ema_p.data.mul_(decay).add_(p.data, alpha=1 - decay)
 
-    Args:
-        data_dir: Path to M3FD train split (containing vis/ and ir/)
-        output_dir: Output directory for fused images
-        model_path: Optional local path to SD v1.5 model
-        device: Device (cuda/cpu)
-        lambda_vis: Visible cues strength
-        num_steps: Diffusion steps
-        t1: IR injection cutoff
-        t2: VIS refinement cutoff
-        guidance_scale: CFG scale
-        seed: Random seed
-        start_idx: Start index (for resuming)
-        end_idx: End index (None = all)
-    """
-    # Default paths
-    if data_dir is None:
-        data_dir = os.path.join(PROJECT_ROOT, "data", "m3fd", "train")
-    if output_dir is None:
-        output_dir = os.path.join(PROJECT_ROOT, "output", "train_results")
 
+def save_checkpoint(model, ema_model, optimizer, scheduler, epoch, loss, path):
+    """Save training checkpoint."""
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'ema_state_dict': ema_model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'loss': loss,
+    }, path)
+
+
+@torch.no_grad()
+def generate_samples(model, diffusion, dataset, device, output_dir, num_samples=4):
+    """Generate sample fused images for visual inspection."""
+    model.eval()
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Check CUDA
+    from torchvision.utils import save_image
+
+    for i in range(min(num_samples, len(dataset))):
+        sample = dataset[i]
+        ir = sample['ir'].unsqueeze(0).to(device)
+        vis = sample['vis'].unsqueeze(0).to(device)
+
+        fused = diffusion.ddim_sample_loop(
+            model, (1, 3, 256, 256), ir, vis,
+            ddim_steps=50, verbose=False
+        )
+
+        fused_01 = (fused.clamp(-1, 1) + 1) / 2
+        ir_01 = (ir + 1) / 2
+        vis_01 = (vis + 1) / 2
+
+        grid = torch.cat([ir_01, vis_01, fused_01], dim=3)
+        save_image(grid, output_path / f"sample_{sample['name']}.png")
+
+    model.train()
+
+
+def run_training(
+    data_dir=None,
+    output_dir=None,
+    checkpoint_dir=None,
+    device="cuda",
+    epochs=100,
+    batch_size=4,
+    lr=1e-4,
+    seed=42,
+    resume_from=None,
+    save_every=10,
+    sample_every=10,
+    ema_decay=0.9999,
+):
+    if data_dir is None:
+        data_dir = os.path.join(PROJECT_ROOT, "data", "m3fd", "train")
+    if output_dir is None:
+        output_dir = os.path.join(PROJECT_ROOT, "output", "training")
+    if checkpoint_dir is None:
+        checkpoint_dir = os.path.join(PROJECT_ROOT, "checkpoints")
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
     if device == "cuda" and not torch.cuda.is_available():
         print("CUDA not available, falling back to CPU")
         device = "cpu"
-        dtype = torch.float32
-    else:
-        dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-    # Load dataset
     print("=" * 60)
-    print("ADAPTIVE DIFFUSION FUSION - TRAINING PHASE")
-    print("Dataset: M3FD (200 images)")
+    print("ADAPTIVE DIFFUSION FUSION - TRAINING")
+    print("=" * 60)
+    print(f"  Device:     {device}")
+    print(f"  Epochs:     {epochs}")
+    print(f"  Batch size: {batch_size}")
+    print(f"  LR:         {lr}")
+    print(f"  Data:       {data_dir}")
     print("=" * 60)
 
     try:
-        dataset = M3FDDataset(
+        dataset = M3FDTrainDataset(
             root_dir=data_dir,
-            image_size=(512, 512)
+            image_size=(256, 256),
+            augment=True,
         )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"\nError: {e}")
-        print("\nPlease run setup first:")
-        print("  python setup_m3fd.py --source_dir /path/to/M3FD")
+        print("Run setup first: python setup_m3fd.py --source_dir /path/to/M3FD")
         sys.exit(1)
 
-    total = len(dataset)
-    if end_idx is None:
-        end_idx = total
-    end_idx = min(end_idx, total)
-    start_idx = max(0, start_idx)
-
-    print(f"Processing images {start_idx} to {end_idx - 1} ({end_idx - start_idx} images)")
-    print(f"Device: {device}")
-    print(f"Parameters: lambda={lambda_vis}, steps={num_steps}, T1={t1}, T2={t2}")
-
-    # Initialize model
-    print("\nLoading Stable Diffusion v1.5...")
-    fusioninv = FusionINV(
-        device=device,
-        dtype=dtype,
-        local_model_path=model_path
-    )
-    fusioninv.set_params(
-        lambda_vis=lambda_vis,
-        num_steps=num_steps,
-        T1=t1,
-        T2=t2
+    dataloader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=True,
+        num_workers=0, pin_memory=(device == "cuda")
     )
 
-    # Process images
-    print("\n" + "=" * 60)
-    print("Processing training images...")
-    print("=" * 60)
+    model = AdaptiveFusionModel().to(device)
+    ema_model = copy.deepcopy(model)
+    diffusion = GaussianDiffusion(num_timesteps=1000, beta_schedule='linear')
 
-    results = []
-    failed = []
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"  Model params: {total_params:,} ({total_params/1e6:.1f}M)")
 
-    for idx in tqdm(range(start_idx, end_idx), desc="Training Fusion"):
-        pair = dataset[idx]
-        name = pair['name']
-        current_seed = seed + idx if seed is not None else None
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-6)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-        try:
-            fused_image = fusioninv.fuse(
-                vis_image_path=pair['vis_path'],
-                ir_image_path=pair['ir_path'],
-                prompt="",
-                guidance_scale=guidance_scale,
-                seed=current_seed,
-                verbose=False
+    start_epoch = 0
+    if resume_from and os.path.exists(resume_from):
+        print(f"\nResuming from: {resume_from}")
+        ckpt = torch.load(resume_from, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+        ema_model.load_state_dict(ckpt['ema_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        start_epoch = ckpt['epoch'] + 1
+        print(f"  Resumed at epoch {start_epoch}")
+
+    print(f"\nStarting training...")
+    best_loss = float('inf')
+    loss_history = []
+
+    for epoch in range(start_epoch, epochs):
+        model.train()
+        epoch_loss = 0.0
+        num_batches = 0
+
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
+        for batch in pbar:
+            ir = batch['ir'].to(device)
+            vis = batch['vis'].to(device)
+            gt_fused = batch['gt_fused'].to(device)
+
+            B = ir.shape[0]
+            t = torch.randint(0, 1000, (B,), device=device)
+
+            loss = diffusion.p_losses(model, gt_fused, t, ir, vis)
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+            update_ema(ema_model, model, decay=ema_decay)
+
+            epoch_loss += loss.item()
+            num_batches += 1
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
+
+        scheduler.step()
+        avg_loss = epoch_loss / max(num_batches, 1)
+        loss_history.append(avg_loss)
+
+        current_lr = scheduler.get_last_lr()[0]
+        print(f"  Epoch {epoch+1}: loss={avg_loss:.6f}, lr={current_lr:.2e}")
+
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            save_checkpoint(
+                model, ema_model, optimizer, scheduler, epoch, avg_loss,
+                os.path.join(checkpoint_dir, "best.pt")
             )
 
-            out_file = output_path / f"{name}_fused.png"
-            fused_image.save(out_file)
+        if (epoch + 1) % save_every == 0:
+            save_checkpoint(
+                model, ema_model, optimizer, scheduler, epoch, avg_loss,
+                os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pt")
+            )
 
-            results.append({
-                'name': name,
-                'vis_path': pair['vis_path'],
-                'ir_path': pair['ir_path'],
-                'output': str(out_file),
-                'success': True
-            })
+        if (epoch + 1) % sample_every == 0:
+            print("  Generating samples...")
+            sample_dataset = M3FDTrainDataset(
+                root_dir=data_dir, image_size=(256, 256), augment=False
+            )
+            generate_samples(
+                ema_model, diffusion, sample_dataset, device,
+                os.path.join(output_dir, f"samples_epoch_{epoch+1}")
+            )
 
-        except Exception as e:
-            print(f"\nError processing {name}: {e}")
-            failed.append({'name': name, 'error': str(e)})
+    save_checkpoint(
+        model, ema_model, optimizer, scheduler, epochs - 1, avg_loss,
+        os.path.join(checkpoint_dir, "final.pt")
+    )
 
-    # Save results log
     log = {
         'phase': 'training',
         'timestamp': datetime.now().isoformat(),
         'dataset': 'M3FD',
-        'total_processed': len(results),
-        'total_failed': len(failed),
-        'parameters': {
-            'lambda_vis': lambda_vis,
-            'num_steps': num_steps,
-            'T1': t1,
-            'T2': t2,
-            'guidance_scale': guidance_scale,
-            'seed': seed,
-            'device': device
-        },
-        'results': results,
-        'failed': failed
+        'epochs': epochs,
+        'batch_size': batch_size,
+        'lr': lr,
+        'best_loss': best_loss,
+        'final_loss': avg_loss,
+        'loss_history': loss_history,
+        'model_params': total_params,
+        'device': device,
     }
-
-    log_file = output_path / "train_results.json"
-    with open(log_file, 'w') as f:
+    with open(os.path.join(output_dir, "train_log.json"), 'w') as f:
         json.dump(log, f, indent=2)
 
-    # Print summary
     print("\n" + "=" * 60)
-    print("TRAINING PHASE COMPLETE")
+    print("TRAINING COMPLETE")
     print("=" * 60)
-    print(f"  Successful: {len(results)}/{end_idx - start_idx}")
-    print(f"  Failed:     {len(failed)}")
-    print(f"  Output:     {output_dir}")
-    print(f"  Log:        {log_file}")
-
-    if failed:
-        print(f"\n  Failed images:")
-        for f_item in failed:
-            print(f"    - {f_item['name']}: {f_item['error']}")
-
-    print("\nNext step: python run_test.py")
+    print(f"  Best loss:    {best_loss:.6f}")
+    print(f"  Final loss:   {avg_loss:.6f}")
+    print(f"  Checkpoints:  {checkpoint_dir}")
+    print(f"  Best model:   {os.path.join(checkpoint_dir, 'best.pt')}")
+    print(f"\nNext step: python run_test.py")
     print("=" * 60)
 
-    return results, failed
+    return loss_history
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Process M3FD training set with Adaptive Diffusion Fusion"
+        description="Train Adaptive Diffusion Fusion Model on M3FD"
     )
-    parser.add_argument("--data_dir", type=str, default=None,
-                        help="Path to M3FD train data (default: data/m3fd/train)")
-    parser.add_argument("--output_dir", type=str, default=None,
-                        help="Output directory (default: output/train_results)")
-    parser.add_argument("--model_path", type=str, default=None,
-                        help="Local path to SD v1.5 model")
-    parser.add_argument("--device", type=str, default="cuda",
-                        help="Device: cuda or cpu (default: cuda)")
-    parser.add_argument("--lambda_vis", type=float, default=0.08,
-                        help="Visible cues strength (default: 0.08)")
-    parser.add_argument("--num_steps", type=int, default=80,
-                        help="Diffusion steps (default: 80)")
-    parser.add_argument("--t1", type=int, default=70,
-                        help="IR injection cutoff (default: 70)")
-    parser.add_argument("--t2", type=int, default=40,
-                        help="VIS refinement cutoff (default: 40)")
-    parser.add_argument("--guidance_scale", type=float, default=7.5,
-                        help="CFG scale (default: 7.5)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed (default: 42)")
-    parser.add_argument("--start_idx", type=int, default=0,
-                        help="Start index for resuming (default: 0)")
-    parser.add_argument("--end_idx", type=int, default=None,
-                        help="End index (default: all)")
+    parser.add_argument("--data_dir", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--checkpoint_dir", type=str, default=None)
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--save_every", type=int, default=10)
+    parser.add_argument("--sample_every", type=int, default=10)
 
     args = parser.parse_args()
 
     run_training(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
-        model_path=args.model_path,
+        checkpoint_dir=args.checkpoint_dir,
         device=args.device,
-        lambda_vis=args.lambda_vis,
-        num_steps=args.num_steps,
-        t1=args.t1,
-        t2=args.t2,
-        guidance_scale=args.guidance_scale,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
         seed=args.seed,
-        start_idx=args.start_idx,
-        end_idx=args.end_idx
+        resume_from=args.resume,
+        save_every=args.save_every,
+        sample_every=args.sample_every,
     )
 
 

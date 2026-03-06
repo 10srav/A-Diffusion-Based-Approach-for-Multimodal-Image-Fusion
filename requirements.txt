@@ -1,25 +1,14 @@
 # Core dependencies
 torch>=2.0.0
 torchvision>=0.15.0
-torchaudio>=2.0.0
-
-# Diffusion models
-diffusers>=0.21.0
-transformers>=4.30.0
-accelerate>=0.20.0
 
 # Image processing
 Pillow>=9.5.0
 numpy>=1.24.0
 opencv-python>=4.8.0
 
-# HuggingFace
-huggingface_hub>=0.16.0
-
 # Utilities
 tqdm>=4.65.0
-einops>=0.6.1
-safetensors>=0.3.0
 
 # Quality metrics
 scikit-image>=0.21.0
