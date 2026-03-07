@@ -64,6 +64,9 @@ class GaussianDiffusion:
         self.sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod).float()
         self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod).float()
 
+        # SNR (signal-to-noise ratio) for min-SNR loss weighting
+        self.snr = (alphas_cumprod / (1.0 - alphas_cumprod)).float()
+
         # Precomputed values for reverse process (posterior)
         self.posterior_variance = (
             betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
@@ -110,9 +113,15 @@ class GaussianDiffusion:
         sqrt_one_minus_alpha = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
         return (x_t - sqrt_one_minus_alpha * noise) / sqrt_alpha
 
-    def p_losses(self, model, x_0, t, ir_image, vis_image, noise=None):
+    def p_losses(self, model, x_0, t, ir_image, vis_image, noise=None,
+                 min_snr_gamma=5.0):
         """
-        Compute DDPM training loss.
+        Compute DDPM training loss with min-SNR weighting.
+
+        Min-SNR weighting (Hang et al. 2023) prevents the loss from being
+        dominated by very high noise timesteps where the model can't learn
+        useful denoising. It clips the SNR weight at gamma, focusing training
+        on mid-range timesteps that matter most for image quality.
 
         Args:
             model: AdaptiveFusionModel
@@ -121,9 +130,10 @@ class GaussianDiffusion:
             ir_image: [B, 3, H, W] infrared image
             vis_image: [B, 3, H, W] visible image
             noise: optional pre-sampled noise
+            min_snr_gamma: SNR clipping value (default: 5.0, set 0 to disable)
 
         Returns:
-            loss: MSE loss between predicted and actual noise
+            loss: weighted MSE loss between predicted and actual noise
         """
         if noise is None:
             noise = torch.randn_like(x_0)
@@ -131,7 +141,18 @@ class GaussianDiffusion:
         x_noisy = self.q_sample(x_0, t, noise=noise)
         noise_pred = model(x_noisy, t, ir_image, vis_image)
 
-        return F.mse_loss(noise_pred, noise)
+        if min_snr_gamma > 0:
+            # Per-sample MSE (not reduced)
+            mse = F.mse_loss(noise_pred, noise, reduction='none')
+            mse = mse.mean(dim=[1, 2, 3])  # [B]
+
+            # min-SNR weight: min(SNR(t), gamma) / SNR(t)
+            snr_t = self._extract(self.snr, t, torch.Size([t.shape[0]])).squeeze()
+            weight = torch.clamp(snr_t, max=min_snr_gamma) / (snr_t + 1e-8)
+
+            return (weight * mse).mean()
+        else:
+            return F.mse_loss(noise_pred, noise)
 
     @torch.no_grad()
     def p_sample(self, model, x_t, t, ir_image, vis_image):
@@ -192,9 +213,11 @@ class GaussianDiffusion:
         return x
 
     def ddim_timesteps(self, ddim_steps=50):
-        """Compute DDIM timestep schedule (evenly spaced)."""
-        step_size = self.num_timesteps // ddim_steps
-        return list(range(0, self.num_timesteps, step_size))
+        """Compute DDIM timestep schedule (evenly spaced, includes T-1)."""
+        # Use linspace to ensure we include both 0 and T-1 (999)
+        # This prevents the mismatch where sampling starts from pure noise (t=T)
+        # but the schedule only covers up to t=980
+        return np.linspace(0, self.num_timesteps - 1, ddim_steps, dtype=int).tolist()
 
     @torch.no_grad()
     def ddim_step(self, model, x_t, t_cur, t_prev, ir_image, vis_image, eta=0.0):

@@ -9,6 +9,7 @@ import copy
 import argparse
 import torch
 import json
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
@@ -75,14 +76,15 @@ def run_training(
     output_dir=None,
     checkpoint_dir=None,
     device="cuda",
-    epochs=100,
+    epochs=500,
     batch_size=4,
-    lr=1e-4,
+    lr=2e-4,
     seed=42,
     resume_from=None,
-    save_every=10,
-    sample_every=10,
+    save_every=25,
+    sample_every=50,
     ema_decay=0.9999,
+    warmup_epochs=10,
 ):
     if data_dir is None:
         data_dir = os.path.join(PROJECT_ROOT, "data", "m3fd", "train")
@@ -135,8 +137,17 @@ def run_training(
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Model params: {total_params:,} ({total_params/1e6:.1f}M)")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-6)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+
+    # LR schedule: linear warmup for warmup_epochs, then cosine decay
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs  # linear warmup from lr/N to lr
+        # Cosine decay from lr to lr*0.01
+        progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
+        return 0.01 + 0.99 * 0.5 * (1 + np.cos(np.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     start_epoch = 0
     if resume_from and os.path.exists(resume_from):
@@ -252,9 +263,9 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--save_every", type=int, default=10)
