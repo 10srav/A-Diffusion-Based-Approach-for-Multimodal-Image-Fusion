@@ -113,10 +113,10 @@ dmypy.json
 
 # Model weights
 pretrained/
-*.pt
 *.pth
 *.safetensors
 *.bin
+# Note: *.pt tracked via Git LFS (see .gitattributes)
 
 # Output files
 output/*.png

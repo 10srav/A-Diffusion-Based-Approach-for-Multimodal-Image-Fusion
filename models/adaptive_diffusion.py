@@ -269,9 +269,15 @@ class GaussianDiffusion:
 
     @torch.no_grad()
     def ddim_sample_loop(self, model, shape, ir_image, vis_image,
-                         ddim_steps=50, eta=0.0, verbose=True):
+                         ddim_steps=50, eta=0.0, verbose=True,
+                         start_image=None, start_strength=0.6):
         """
-        DDIM fast sampling (default: 50 steps).
+        DDIM fast sampling with optional SDEdit (image-to-image refinement).
+
+        When start_image is provided, uses SDEdit approach: adds noise to
+        the start_image up to a mid-range timestep, then denoises from there.
+        This produces much cleaner outputs with small models since the model
+        refines an existing image rather than generating from pure noise.
 
         Args:
             model: AdaptiveFusionModel
@@ -280,17 +286,35 @@ class GaussianDiffusion:
             ddim_steps: number of DDIM steps
             eta: stochasticity (0 = deterministic)
             verbose: show progress bar
+            start_image: [B, C, H, W] optional starting image (e.g. pseudo GT)
+            start_strength: fraction of timesteps to denoise (0.6 = start at 60% noise)
 
         Returns:
             x_0: [B, C, H, W] generated image
         """
         device = ir_image.device
-        x = torch.randn(shape, device=device)
-
         timesteps = self.ddim_timesteps(ddim_steps)
-        timestep_pairs = list(zip(reversed(timesteps[1:]), reversed(timesteps[:-1])))
-        # Add final step to 0
-        timestep_pairs.append((timesteps[0], -1))
+
+        if start_image is not None:
+            # SDEdit: start from partially noised image
+            start_step = int(len(timesteps) * start_strength)
+            start_step = max(1, min(start_step, len(timesteps) - 1))
+            t_start = timesteps[-(start_step + 1)]
+
+            # Add noise to start_image at t_start
+            t_batch = torch.full((shape[0],), t_start, device=device, dtype=torch.long)
+            noise = torch.randn(shape, device=device)
+            x = self.q_sample(start_image, t_batch, noise=noise)
+
+            # Only use timesteps from t_start downward
+            active_timesteps = [t for t in timesteps if t <= t_start]
+        else:
+            # Standard: start from pure noise
+            x = torch.randn(shape, device=device)
+            active_timesteps = timesteps
+
+        timestep_pairs = list(zip(reversed(active_timesteps[1:]), reversed(active_timesteps[:-1])))
+        timestep_pairs.append((active_timesteps[0], -1))
 
         iterator = tqdm(timestep_pairs, desc="DDIM Sampling") if verbose else timestep_pairs
 

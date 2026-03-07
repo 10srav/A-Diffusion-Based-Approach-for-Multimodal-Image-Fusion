@@ -13,7 +13,7 @@ from typing import Optional, List, Dict
 from tqdm import tqdm
 import torchvision.transforms.functional as TF
 
-from models.adaptive_fusion_net import AdaptiveFusionModel
+from models.adaptive_fusion_net import AdaptiveFusionModel, create_pseudo_gt
 from models.adaptive_diffusion import GaussianDiffusion
 
 
@@ -91,15 +91,22 @@ class AdaptiveDiffusionFusion:
         ir_image_path: str,
         seed: Optional[int] = None,
         verbose: bool = True,
+        strength: float = 0.95,
     ) -> Image.Image:
         """
-        Fuse a visible and infrared image pair.
+        Fuse a visible and infrared image pair using SDEdit refinement.
+
+        Creates a pseudo ground-truth fusion first, then uses the diffusion
+        model to refine it. This produces much cleaner results than
+        generating from pure noise.
 
         Args:
             vis_image_path: Path to visible image
             ir_image_path: Path to infrared image
             seed: Random seed for reproducibility
             verbose: Show progress
+            strength: Noise strength (0.3-0.7). Lower = closer to pseudo GT,
+                      higher = more diffusion refinement.
 
         Returns:
             Fused PIL image
@@ -114,10 +121,14 @@ class AdaptiveDiffusionFusion:
         ir = self.load_image(ir_image_path)
         vis = self.load_image(vis_image_path)
 
+        # Create pseudo GT as starting point
+        pseudo_gt = create_pseudo_gt(ir, vis)
+
         shape = (1, 3, self.image_size, self.image_size)
         fused_tensor = self.diffusion.ddim_sample_loop(
             self.model, shape, ir, vis,
-            ddim_steps=self.ddim_steps, verbose=verbose
+            ddim_steps=self.ddim_steps, verbose=verbose,
+            start_image=pseudo_gt, start_strength=strength,
         )
 
         return self.tensor_to_pil(fused_tensor)
