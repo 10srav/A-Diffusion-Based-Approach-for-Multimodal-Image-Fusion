@@ -160,6 +160,11 @@ def run_training(
         start_epoch = ckpt['epoch'] + 1
         print(f"  Resumed at epoch {start_epoch}")
 
+    # Mixed precision for ~2x speedup on RTX GPUs
+    use_amp = (device == "cuda")
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
+    print(f"  AMP:        {'enabled' if use_amp else 'disabled'}")
     print(f"\nStarting training...")
     best_loss = float('inf')
     loss_history = []
@@ -178,12 +183,15 @@ def run_training(
             B = ir.shape[0]
             t = torch.randint(0, 1000, (B,), device=device)
 
-            loss = diffusion.p_losses(model, gt_fused, t, ir, vis)
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                loss = diffusion.p_losses(model, gt_fused, t, ir, vis)
 
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             update_ema(ema_model, model, decay=ema_decay)
 

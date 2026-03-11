@@ -263,15 +263,17 @@ class M3FDTrainDataset(Dataset):
         }
 
     @staticmethod
-    def _create_pseudo_gt(ir_tensor, vis_tensor):
-        """Max-luminance fusion + visible color preservation."""
+    def _create_pseudo_gt(ir_tensor, vis_tensor, vis_weight=0.7):
+        """Visible-dominant fusion: visible base + subtle IR enhancement."""
         ir_01 = (ir_tensor + 1) / 2
         vis_01 = (vis_tensor + 1) / 2
 
         ir_y = 0.299 * ir_01[0:1] + 0.587 * ir_01[1:2] + 0.114 * ir_01[2:3]
         vis_y = 0.299 * vis_01[0:1] + 0.587 * vis_01[1:2] + 0.114 * vis_01[2:3]
 
-        fused_y = torch.max(ir_y, vis_y)
+        # Visible-biased: use visible as base, add IR only in dark regions
+        ir_boost = torch.relu(ir_y - vis_y)
+        fused_y = vis_y + (1.0 - vis_weight) * ir_boost
 
         vis_cb = vis_01[2:3] - vis_y
         vis_cr = vis_01[0:1] - vis_y
