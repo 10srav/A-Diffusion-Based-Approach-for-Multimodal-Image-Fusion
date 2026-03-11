@@ -152,14 +152,16 @@ class AdaptiveFusionAttention(nn.Module):
         return fused.permute(0, 2, 1).reshape(B, C, H, W)
 
 
-def create_pseudo_gt(ir_image, vis_image):
+def create_pseudo_gt(ir_image, vis_image, vis_weight=0.7):
     """
-    Create pseudo ground-truth fused image for training.
-    Uses max-luminance strategy + visible color preservation.
+    Create pseudo ground-truth fused image with visible-dominant style.
+    Preserves visible image's natural appearance while subtly enhancing
+    with IR information in dark/low-visibility regions.
 
     Args:
         ir_image: [B, 3, H, W] tensor in [-1, 1]
         vis_image: [B, 3, H, W] tensor in [-1, 1]
+        vis_weight: How much to favor visible style (0.5=equal, 0.8=very visible)
 
     Returns:
         fused: [B, 3, H, W] tensor in [-1, 1]
@@ -172,14 +174,16 @@ def create_pseudo_gt(ir_image, vis_image):
     ir_y = 0.299 * ir_01[:, 0:1] + 0.587 * ir_01[:, 1:2] + 0.114 * ir_01[:, 2:3]
     vis_y = 0.299 * vis_01[:, 0:1] + 0.587 * vis_01[:, 1:2] + 0.114 * vis_01[:, 2:3]
 
-    # Max luminance (structure from whichever source is stronger)
-    fused_y = torch.max(ir_y, vis_y)
+    # Visible-biased luminance: use visible as base, add IR only where
+    # IR sees more than visible (dark regions, thermal targets)
+    ir_boost = torch.relu(ir_y - vis_y)  # IR advantage over visible
+    fused_y = vis_y + (1.0 - vis_weight) * ir_boost
 
-    # Chrominance from visible image (natural color)
+    # Chrominance from visible image (preserves natural color fully)
     vis_cb = vis_01[:, 2:3] - vis_y
     vis_cr = vis_01[:, 0:1] - vis_y
 
-    # Reconstruct RGB
+    # Reconstruct RGB with visible colors
     fused_r = fused_y + vis_cr
     fused_g = fused_y - 0.344136 * vis_cb - 0.714136 * vis_cr
     fused_b = fused_y + vis_cb
