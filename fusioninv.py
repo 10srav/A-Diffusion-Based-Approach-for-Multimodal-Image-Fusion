@@ -13,16 +13,28 @@ from typing import Optional, List, Dict
 from tqdm import tqdm
 import torchvision.transforms.functional as TF
 
-from models.adaptive_fusion_net import AdaptiveFusionModel, create_pseudo_gt
+from models.adaptive_fusion_net import (
+    AdaptiveFusionModel, LatentAdaptiveFusionModel, create_pseudo_gt,
+)
 from models.adaptive_diffusion import GaussianDiffusion
+from models.content_analyzer import (
+    ContentAnalyzer,
+    AdaptiveTimestepSelector,
+    ContentAdaptiveNoiseSchedule,
+)
+from models.feature_memory import FeatureMemoryBank, DualModalityFeatureMemory
+from models.adaptive_sampler import AdaptiveDDIMSampler
+from models.vae import FusionVAE
 
 
 class AdaptiveDiffusionFusion:
     """
     Adaptive Diffusion Fusion pipeline.
 
-    Loads a trained checkpoint and uses DDIM sampling to fuse
-    infrared and visible images into a single output.
+    Auto-detects checkpoint version:
+      - v1: Standard DDPM/DDIM sampling
+      - v2: Adaptive diffusion with content-aware schedule,
+            DDIM inversion, feature memory, adaptive step count
     """
 
     def __init__(
@@ -42,28 +54,92 @@ class AdaptiveDiffusionFusion:
 
         print("Loading Adaptive Diffusion Fusion model...")
 
-        # Build model and diffusion
         self.model = AdaptiveFusionModel().to(self.device)
-        self.diffusion = GaussianDiffusion(num_timesteps=1000, beta_schedule='linear')
+        self.diffusion = GaussianDiffusion(
+            num_timesteps=1000, beta_schedule='linear'
+        )
 
-        # Load checkpoint
-        ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        ckpt = torch.load(
+            checkpoint_path, map_location=self.device, weights_only=False
+        )
 
-        # Prefer EMA weights if available
+        # Detect version: 1=standard, 2=adaptive pixel, 3=adaptive latent (VAE)
+        self.version = ckpt.get('version', 1)
+
+        # Build the right model for this version
+        if self.version >= 3:
+            # v3: Latent-space model with VAE
+            self.model = LatentAdaptiveFusionModel(
+                latent_channels=4, latent_size=32
+            ).to(self.device)
+        else:
+            self.model = AdaptiveFusionModel().to(self.device)
+
+        # Load backbone weights
         if 'ema_state_dict' in ckpt:
-            self.model.load_state_dict(ckpt['ema_state_dict'])
+            self.model.load_state_dict(
+                ckpt['ema_state_dict'], strict=False
+            )
             print("  Loaded EMA weights")
         elif 'model_state_dict' in ckpt:
-            self.model.load_state_dict(ckpt['model_state_dict'])
+            self.model.load_state_dict(
+                ckpt['model_state_dict'], strict=False
+            )
             print("  Loaded model weights")
         else:
-            self.model.load_state_dict(ckpt)
+            self.model.load_state_dict(ckpt, strict=False)
             print("  Loaded raw state dict")
 
         self.model.eval()
 
+        # Initialize adaptive modules for v2+ checkpoints
+        self.adaptive_sampler = None
+        self.vae = None
+
+        if self.version >= 2:
+            print("  Loading adaptive diffusion modules...")
+            ca = ContentAnalyzer(descriptor_dim=64).to(self.device)
+            ts = AdaptiveTimestepSelector(descriptor_dim=64).to(self.device)
+            ns = ContentAdaptiveNoiseSchedule(descriptor_dim=64).to(self.device)
+
+            ca.load_state_dict(ckpt['content_analyzer_state_dict'])
+            ts.load_state_dict(ckpt['timestep_selector_state_dict'])
+            ns.load_state_dict(ckpt['noise_schedule_state_dict'])
+
+            ca.eval()
+            ts.eval()
+            ns.eval()
+
+            # v3: VAE + DualModalityFeatureMemory
+            if self.version >= 3:
+                self.vae = FusionVAE(latent_channels=4).to(self.device)
+                self.vae.load_state_dict(ckpt['vae_state_dict'])
+                self.vae.eval()
+                print("  VAE loaded (latent-space mode)")
+
+                fm = DualModalityFeatureMemory().to(self.device)
+                fm.load_state_dict(ckpt['feature_memory_state_dict'])
+                fm.eval()
+            else:
+                # v2: pixel-space with single FeatureMemoryBank
+                fm = FeatureMemoryBank().to(self.device)
+                fm.load_state_dict(ckpt['feature_memory_state_dict'])
+                fm.eval()
+
+            self.adaptive_sampler = AdaptiveDDIMSampler(
+                base_diffusion=self.diffusion,
+                content_analyzer=ca,
+                timestep_selector=ts,
+                noise_schedule=ns,
+                feature_memory=fm,
+                vae=self.vae,  # None for v2, FusionVAE for v3
+            )
+            print("  Adaptive modules loaded")
+
         epoch = ckpt.get('epoch', '?')
         loss = ckpt.get('loss', '?')
+        mode_names = {1: 'Standard', 2: 'Adaptive (pixel)', 3: 'Adaptive (latent+VAE)'}
+        print(f"  Checkpoint version: v{self.version} ({mode_names.get(self.version, '?')})")
         print(f"  Checkpoint epoch: {epoch}, loss: {loss}")
         print("Adaptive Diffusion Fusion ready!")
 
@@ -94,19 +170,18 @@ class AdaptiveDiffusionFusion:
         strength: float = 0.95,
     ) -> Image.Image:
         """
-        Fuse a visible and infrared image pair using SDEdit refinement.
+        Fuse a visible and infrared image pair.
 
-        Creates a pseudo ground-truth fusion first, then uses the diffusion
-        model to refine it. This produces much cleaner results than
-        generating from pure noise.
+        v1: SDEdit refinement with standard DDIM sampling.
+        v2: Adaptive diffusion with content-aware schedule, DDIM inversion
+            with feature memory, and adaptive reverse sampling.
 
         Args:
             vis_image_path: Path to visible image
             ir_image_path: Path to infrared image
             seed: Random seed for reproducibility
             verbose: Show progress
-            strength: Noise strength (0.3-0.7). Lower = closer to pseudo GT,
-                      higher = more diffusion refinement.
+            strength: Noise strength for v1 (ignored in v2, auto-adapted)
 
         Returns:
             Fused PIL image
@@ -117,19 +192,32 @@ class AdaptiveDiffusionFusion:
         if verbose:
             print(f"  VIS: {vis_image_path}")
             print(f"  IR:  {ir_image_path}")
+            print(f"  Mode: {'Adaptive (v2)' if self.adaptive_sampler else 'Standard (v1)'}")
 
         ir = self.load_image(ir_image_path)
         vis = self.load_image(vis_image_path)
 
         # Create pseudo GT as starting point
         pseudo_gt = create_pseudo_gt(ir, vis)
-
         shape = (1, 3, self.image_size, self.image_size)
-        fused_tensor = self.diffusion.ddim_sample_loop(
-            self.model, shape, ir, vis,
-            ddim_steps=self.ddim_steps, verbose=verbose,
-            start_image=pseudo_gt, start_strength=strength,
-        )
+
+        if self.adaptive_sampler is not None:
+            # v2: Adaptive diffusion sampling
+            fused_tensor, info = self.adaptive_sampler.sample(
+                self.model, shape, ir, vis,
+                start_image=pseudo_gt,
+                verbose=verbose,
+            )
+            if verbose:
+                print(f"  Adaptive steps: {info['num_steps']}, "
+                      f"complexity: {info['complexity_scalar']}")
+        else:
+            # v1: Standard DDIM with SDEdit
+            fused_tensor = self.diffusion.ddim_sample_loop(
+                self.model, shape, ir, vis,
+                ddim_steps=self.ddim_steps, verbose=verbose,
+                start_image=pseudo_gt, start_strength=strength,
+            )
 
         return self.tensor_to_pil(fused_tensor)
 

@@ -370,13 +370,20 @@ def main():
                         help="End index")
     parser.add_argument("--skip_fusion", action="store_true",
                         help="Skip fusion, only compute metrics on existing outputs")
+    parser.add_argument("--adaptive", action="store_true",
+                        help="Use adaptive diffusion checkpoint (adaptive_best.pt)")
 
     args = parser.parse_args()
+
+    # Auto-select adaptive checkpoint if --adaptive flag is set
+    checkpoint = args.checkpoint
+    if args.adaptive and checkpoint is None:
+        checkpoint = os.path.join(PROJECT_ROOT, "checkpoints", "adaptive_best.pt")
 
     run_testing(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
-        checkpoint=args.checkpoint,
+        checkpoint=checkpoint,
         device=args.device,
         ddim_steps=args.ddim_steps,
         seed=args.seed,

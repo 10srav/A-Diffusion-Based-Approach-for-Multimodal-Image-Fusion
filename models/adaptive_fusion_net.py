@@ -256,7 +256,8 @@ class AdaptiveFusionModel(nn.Module):
 
         return fused_feats
 
-    def forward(self, x_noisy, t, ir_image, vis_image):
+    def forward(self, x_noisy, t, ir_image, vis_image,
+                memory_bank=None, current_t=None):
         """
         Forward pass: predict noise from noisy image conditioned on IR+VIS.
 
@@ -265,6 +266,8 @@ class AdaptiveFusionModel(nn.Module):
             t: [B] timestep
             ir_image: [B, 3, 256, 256] clean IR input
             vis_image: [B, 3, 256, 256] clean VIS input
+            memory_bank: optional FeatureMemoryBank for temporal retrieval
+            current_t: optional int, current timestep for memory lookup
 
         Returns:
             predicted_noise: [B, 3, 256, 256]
@@ -275,4 +278,145 @@ class AdaptiveFusionModel(nn.Module):
         x_in = torch.cat([x_noisy, cond_feats[0]], dim=1)
 
         # U-Net predicts noise, with multi-scale condition injection
-        return self.unet(x_in, t, cond_feats)
+        return self.unet(x_in, t, cond_feats,
+                         memory_bank=memory_bank, current_t=current_t)
+
+    def forward_with_intermediates(self, x_noisy, t, ir_image, vis_image):
+        """
+        Same as forward() but also returns UNet intermediate features
+        for caching in FeatureMemoryBank during DDIM inversion.
+
+        Returns:
+            predicted_noise: [B, 3, 256, 256]
+            intermediates: dict with 'encoder_skips' and 'bottleneck'
+        """
+        cond_feats = self.encode_conditions(ir_image, vis_image)
+        x_in = torch.cat([x_noisy, cond_feats[0]], dim=1)
+        return self.unet.forward_with_intermediates(x_in, t, cond_feats)
+
+
+class LatentAdaptiveFusionModel(nn.Module):
+    """
+    Latent-Space Adaptive Diffusion Fusion Model.
+
+    Works in VAE latent space instead of pixel space:
+      - UNet input/output: [B, latent_channels, 32, 32] (from VAE)
+      - Condition encoders: still operate on RGB [B, 3, 256, 256]
+      - Features downsampled to match latent resolution
+
+    Architecture matching client diagram:
+      IR/VIS RGB -> ModalityEncoders -> Fusion -> condition features
+      z_noisy [4,32,32] + conditions -> UNet -> noise prediction [4,32,32]
+    """
+
+    def __init__(
+        self,
+        latent_channels=4,
+        latent_size=32,
+        condition_in_channels=3,
+        feature_channels=(16, 32, 64, 128),
+        unet_channels=(32, 64, 128, 256),
+    ):
+        super().__init__()
+        self.latent_channels = latent_channels
+        self.latent_size = latent_size
+
+        # Dual RGB encoders (operate on full-res RGB images)
+        self.ir_encoder = ModalityEncoder(condition_in_channels, feature_channels)
+        self.vis_encoder = ModalityEncoder(condition_in_channels, feature_channels)
+
+        # Adaptive fusion at each scale
+        self.fusion_blocks = nn.ModuleList([
+            AdaptiveFusionGate(feature_channels[0]),
+            AdaptiveFusionGate(feature_channels[1]),
+            AdaptiveFusionAttention(feature_channels[2]),
+            AdaptiveFusionAttention(feature_channels[3]),
+        ])
+
+        # Project fused condition features to match latent spatial dims
+        # Scale0 (256->32): used as concat input
+        self.cond_proj_0 = nn.Sequential(
+            nn.Conv2d(feature_channels[0], feature_channels[0], 3,
+                      stride=8, padding=1),
+            nn.GroupNorm(_num_groups(feature_channels[0]), feature_channels[0]),
+            nn.SiLU(),
+        )
+        # Scale1 (128->16): skip injection
+        self.cond_proj_1 = nn.Sequential(
+            nn.Conv2d(feature_channels[1], feature_channels[1], 3,
+                      stride=8, padding=1),
+            nn.GroupNorm(_num_groups(feature_channels[1]), feature_channels[1]),
+            nn.SiLU(),
+        )
+        # Scale2 (64->8): skip injection
+        self.cond_proj_2 = nn.Sequential(
+            nn.Conv2d(feature_channels[2], feature_channels[2], 3,
+                      stride=8, padding=1),
+            nn.GroupNorm(_num_groups(feature_channels[2]), feature_channels[2]),
+            nn.SiLU(),
+        )
+        # Scale3 (32->4): skip injection
+        self.cond_proj_3 = nn.Sequential(
+            nn.Conv2d(feature_channels[3], feature_channels[3], 3,
+                      stride=8, padding=1),
+            nn.GroupNorm(_num_groups(feature_channels[3]), feature_channels[3]),
+            nn.SiLU(),
+        )
+
+        # Denoising U-Net in latent space
+        # Input: latent_channels + projected condition features
+        self.unet = AdaptiveUNet(
+            in_channels=latent_channels + feature_channels[0],
+            out_channels=latent_channels,
+            channel_mult=unet_channels,
+            condition_channels=feature_channels,
+        )
+
+    def encode_conditions(self, ir_image, vis_image):
+        """
+        Extract and fuse multi-scale condition features from RGB images,
+        then project to match latent spatial dimensions.
+        """
+        ir_feats = self.ir_encoder(ir_image)    # [256, 128, 64, 32]
+        vis_feats = self.vis_encoder(vis_image)
+
+        fused_feats = []
+        for i, fusion_block in enumerate(self.fusion_blocks):
+            fused = fusion_block(ir_feats[i], vis_feats[i])
+            fused_feats.append(fused)
+
+        # Project to latent resolution
+        projected = [
+            self.cond_proj_0(fused_feats[0]),   # 256->32
+            self.cond_proj_1(fused_feats[1]),   # 128->16
+            self.cond_proj_2(fused_feats[2]),   # 64->8
+            self.cond_proj_3(fused_feats[3]),   # 32->4
+        ]
+        return projected
+
+    def forward(self, z_noisy, t, ir_image, vis_image,
+                memory_bank=None, current_t=None):
+        """
+        Predict noise in latent space conditioned on RGB IR+VIS images.
+
+        Args:
+            z_noisy: [B, 4, 32, 32] noisy latent
+            t: [B] timestep
+            ir_image: [B, 3, 256, 256] clean IR RGB
+            vis_image: [B, 3, 256, 256] clean VIS RGB
+            memory_bank: optional DualModalityFeatureMemory
+            current_t: optional int for memory lookup
+
+        Returns:
+            predicted_noise: [B, 4, 32, 32]
+        """
+        cond_feats = self.encode_conditions(ir_image, vis_image)
+        z_in = torch.cat([z_noisy, cond_feats[0]], dim=1)
+        return self.unet(z_in, t, cond_feats,
+                         memory_bank=memory_bank, current_t=current_t)
+
+    def forward_with_intermediates(self, z_noisy, t, ir_image, vis_image):
+        """Forward pass returning UNet intermediates for memory caching."""
+        cond_feats = self.encode_conditions(ir_image, vis_image)
+        z_in = torch.cat([z_noisy, cond_feats[0]], dim=1)
+        return self.unet.forward_with_intermediates(z_in, t, cond_feats)

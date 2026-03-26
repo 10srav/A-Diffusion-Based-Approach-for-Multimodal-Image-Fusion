@@ -193,23 +193,8 @@ class AdaptiveUNet(nn.Module):
         self.out_act = nn.SiLU()
         self.out_conv = nn.Conv2d(channel_mult[0], out_channels, 3, padding=1)
 
-    def forward(self, x, t, condition_features=None):
-        """
-        Forward pass.
-
-        Args:
-            x: [B, in_channels, 256, 256] noisy image concatenated with scale-0 condition
-            t: [B] timesteps
-            condition_features: list of [feat_0, feat_1, feat_2, feat_3] for skip injection
-                feat_0: [B, 32, 256, 256], feat_1: [B, 64, 128, 128],
-                feat_2: [B, 128, 64, 64], feat_3: [B, 256, 32, 32]
-
-        Returns:
-            [B, out_channels, 256, 256] predicted noise
-        """
-        t_emb = self.time_embed(t)
-
-        # Encoder
+    def _run_encoder_and_bottleneck(self, x, t_emb):
+        """Run encoder and bottleneck, returning skips and bottleneck feature."""
         h = self.enc_conv_in(x)
 
         # Level 0
@@ -241,7 +226,15 @@ class AdaptiveUNet(nn.Module):
         # Bottleneck
         h = self.mid_res1(h, t_emb)
         h = self.mid_attn(h)
+        h_bottleneck = h  # capture before second res block
         h = self.mid_res2(h, t_emb)
+
+        return h, [skip0, skip1, skip2, skip3], h_bottleneck
+
+    def _run_decoder(self, h, skips, t_emb, condition_features=None,
+                     memory_bank=None, current_t=None):
+        """Run decoder with optional memory injection."""
+        skip0, skip1, skip2, skip3 = skips
 
         # Decoder Level 3
         h = self.up3(h)
@@ -251,6 +244,9 @@ class AdaptiveUNet(nn.Module):
         h = torch.cat(skip_cat, dim=1)
         h = self.dec_res3a(h, t_emb)
         h = self.dec_res3b(h, t_emb)
+        # Memory injection at scale3 (32x32)
+        if memory_bank is not None and current_t is not None:
+            h = h + memory_bank.retrieve(h, 'scale3', current_t)
         h = self.dec_attn3(h)
 
         # Decoder Level 2
@@ -261,6 +257,9 @@ class AdaptiveUNet(nn.Module):
         h = torch.cat(skip_cat, dim=1)
         h = self.dec_res2a(h, t_emb)
         h = self.dec_res2b(h, t_emb)
+        # Memory injection at scale2 (64x64)
+        if memory_bank is not None and current_t is not None:
+            h = h + memory_bank.retrieve(h, 'scale2', current_t)
         h = self.dec_attn2(h)
 
         # Decoder Level 1
@@ -284,3 +283,48 @@ class AdaptiveUNet(nn.Module):
         # Output
         h = self.out_act(self.out_norm(h))
         return self.out_conv(h)
+
+    def forward(self, x, t, condition_features=None,
+                memory_bank=None, current_t=None):
+        """
+        Forward pass.
+
+        Args:
+            x: [B, in_channels, 256, 256] noisy image concatenated with scale-0 condition
+            t: [B] timesteps
+            condition_features: list of [feat_0, feat_1, feat_2, feat_3] for skip injection
+            memory_bank: optional FeatureMemoryBank for temporal feature retrieval
+            current_t: optional int, current timestep for memory lookup
+
+        Returns:
+            [B, out_channels, 256, 256] predicted noise
+        """
+        t_emb = self.time_embed(t)
+        h, skips, _ = self._run_encoder_and_bottleneck(x, t_emb)
+
+        # Memory injection at bottleneck (16x16)
+        if memory_bank is not None and current_t is not None:
+            h = h + memory_bank.retrieve(h, 'bottleneck', current_t)
+
+        return self._run_decoder(h, skips, t_emb, condition_features,
+                                 memory_bank, current_t)
+
+    def forward_with_intermediates(self, x, t, condition_features=None):
+        """
+        Same as forward() but also returns intermediate features
+        for caching in FeatureMemoryBank during DDIM inversion.
+
+        Returns:
+            noise_pred: [B, out_channels, 256, 256]
+            intermediates: dict with 'encoder_skips' and 'bottleneck'
+        """
+        t_emb = self.time_embed(t)
+        h, skips, h_bottleneck = self._run_encoder_and_bottleneck(x, t_emb)
+
+        noise_pred = self._run_decoder(h, skips, t_emb, condition_features)
+
+        intermediates = {
+            'encoder_skips': skips,
+            'bottleneck': h_bottleneck,
+        }
+        return noise_pred, intermediates

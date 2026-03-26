@@ -322,3 +322,106 @@ class GaussianDiffusion:
             x = self.ddim_step(model, x, t_cur, t_prev, ir_image, vis_image, eta=eta)
 
         return x
+
+    # ================================================================
+    # Adaptive Diffusion Methods
+    # ================================================================
+
+    def adaptive_q_sample(self, x_0, t, adaptive_alphas_cumprod, noise=None):
+        """
+        Forward process with per-image adaptive noise schedule.
+
+        Args:
+            x_0: [B, C, H, W] clean image
+            t: [B] timestep indices
+            adaptive_alphas_cumprod: [B, T] per-image cumulative alpha products
+            noise: optional pre-sampled noise
+
+        Returns:
+            x_t: [B, C, H, W] noisy image at timestep t
+        """
+        if noise is None:
+            noise = torch.randn_like(x_0)
+
+        B = x_0.shape[0]
+        # Per-image alpha extraction
+        sqrt_alpha = torch.sqrt(
+            adaptive_alphas_cumprod[torch.arange(B, device=t.device), t]
+        ).view(B, 1, 1, 1)
+        sqrt_one_minus_alpha = torch.sqrt(
+            1.0 - adaptive_alphas_cumprod[torch.arange(B, device=t.device), t]
+        ).view(B, 1, 1, 1)
+
+        return sqrt_alpha * x_0 + sqrt_one_minus_alpha * noise
+
+    def adaptive_p_losses(self, model, x_0, t, ir_image, vis_image,
+                          adaptive_alphas_cumprod, base_alphas_cumprod=None,
+                          noise=None, min_snr_gamma=5.0,
+                          schedule_reg_weight=0.01):
+        """
+        Training loss with content-adaptive noise schedule.
+
+        Combines standard denoising loss (with adaptive per-image schedule)
+        and schedule regularization to prevent the adaptive schedule from
+        collapsing to trivial solutions.
+
+        Args:
+            model: AdaptiveFusionModel
+            x_0: [B, C, H, W] clean fused image
+            t: [B] timestep indices
+            ir_image, vis_image: condition images
+            adaptive_alphas_cumprod: [B, T] per-image schedule
+            base_alphas_cumprod: [T] base schedule for regularization
+            noise: optional pre-sampled noise
+            min_snr_gamma: SNR clipping value
+            schedule_reg_weight: weight for schedule regularization loss
+
+        Returns:
+            total_loss: weighted combination of denoising + regularization
+            loss_dict: dict with individual loss components
+        """
+        if noise is None:
+            noise = torch.randn_like(x_0)
+
+        B = x_0.shape[0]
+
+        # Forward process with adaptive schedule
+        x_noisy = self.adaptive_q_sample(x_0, t, adaptive_alphas_cumprod,
+                                          noise=noise)
+        noise_pred = model(x_noisy, t, ir_image, vis_image)
+
+        # Per-sample MSE
+        mse = F.mse_loss(noise_pred, noise, reduction='none')
+        mse = mse.mean(dim=[1, 2, 3])  # [B]
+
+        # Adaptive min-SNR weighting using per-image SNR
+        alpha_t = adaptive_alphas_cumprod[
+            torch.arange(B, device=t.device), t
+        ]
+        snr_t = alpha_t / (1.0 - alpha_t + 1e-8)
+
+        if min_snr_gamma > 0:
+            weight = torch.clamp(snr_t, max=min_snr_gamma) / (snr_t + 1e-8)
+            denoising_loss = (weight * mse).mean()
+        else:
+            denoising_loss = mse.mean()
+
+        # Schedule regularization: prevent adaptive schedule from
+        # diverging too far from the base schedule
+        total_loss = denoising_loss
+        schedule_reg = torch.tensor(0.0, device=x_0.device)
+
+        if base_alphas_cumprod is not None and schedule_reg_weight > 0:
+            base_expanded = base_alphas_cumprod.unsqueeze(0).expand(
+                B, -1
+            ).to(x_0.device)
+            schedule_reg = F.mse_loss(adaptive_alphas_cumprod, base_expanded)
+            total_loss = total_loss + schedule_reg_weight * schedule_reg
+
+        loss_dict = {
+            'denoising': denoising_loss.item(),
+            'schedule_reg': schedule_reg.item(),
+            'total': total_loss.item(),
+        }
+
+        return total_loss, loss_dict
