@@ -144,3 +144,6 @@ output/test_*/
 
 # Hugging Face cache
 .cache/
+data/m3fd_raw/
+__pycache__/
+venv/
