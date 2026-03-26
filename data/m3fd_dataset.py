@@ -1,5 +1,5 @@
 """
-M3FD Dataset Loader for FusionINV
+M3FD Dataset Loader for Adaptive Diffusion Fusion
 Handles loading and preprocessing of M3FD (Multi-spectral) infrared-visible image pairs.
 Supports train/test split: 200 images for training, 100 images for testing.
 """

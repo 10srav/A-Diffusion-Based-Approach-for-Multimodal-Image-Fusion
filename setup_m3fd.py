@@ -202,7 +202,7 @@ def setup_m3fd(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Setup M3FD dataset for FusionINV"
+        description="Setup M3FD dataset for Adaptive Diffusion Fusion"
     )
     parser.add_argument(
         "--source_dir",

@@ -1,6 +1,6 @@
 """
-TNO Dataset Loader for FusionINV
-Handles loading and preprocessing of the TNO multiband image data collection
+TNO Dataset Loader for Adaptive Diffusion Fusion
+Handles loading and preprocessing of the TNO multiband image data collection.
 """
 import os
 from pathlib import Path
@@ -209,7 +209,7 @@ class TNODataset(Dataset):
 
 class TNODataLoader:
     """
-    Convenience wrapper for loading TNO dataset for FusionINV.
+    Convenience wrapper for loading TNO dataset for Adaptive Diffusion Fusion.
     """
 
     def __init__(

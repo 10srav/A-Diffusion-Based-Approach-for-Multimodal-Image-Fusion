@@ -1,142 +1,119 @@
-# FusionINV: A Diffusion-Based Approach for Multimodal Image Fusion
+# Adaptive Diffusion Fusion for Multimodal Image Fusion
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Implementation of **FusionINV** (IEEE TIP 2025) - a training-free method for infrared and visible image fusion using Stable Diffusion v1.5 inversion.
+A custom **Adaptive Diffusion Fusion** model (~17M parameters) for infrared and visible image fusion. Trained from scratch on the M3FD dataset using a DDPM/DDIM diffusion framework with content-aware adaptive fusion attention.
+
+Inspired by [FusionINV](https://ieeexplore.ieee.org/document/11114795) (IEEE TIP 2025).
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         FusionINV Pipeline                                  │
+│                    Adaptive Diffusion Fusion Pipeline                       │
 │                                                                             │
-│  ╔═══════════════════════════════════════════════════════════════════════╗  │
-│  ║                    TNO DATASET (RECOMMENDED)                          ║  │
-│  ║         Standard Benchmark for IR-VIS Image Fusion                    ║  │
-│  ║  ┌─────────────────────────┐    ┌─────────────────────────┐           ║  │
-│  ║  │      tno/vis/           │    │       tno/ir/           │           ║  │
-│  ║  │  ┌─────┐ ┌─────┐        │    │  ┌─────┐ ┌─────┐        │           ║  │
-│  ║  │  │.png │ │.png │ ...    │    │  │.png │ │.png │ ...    │           ║  │
-│  ║  │  └─────┘ └─────┘        │    │  └─────┘ └─────┘        │           ║  │
-│  ║  └───────────┬─────────────┘    └───────────┬─────────────┘           ║  │
-│  ╚══════════════╪══════════════════════════════╪═════════════════════════╝  │
-│                 │                              │                            │
-│                 ▼                              ▼                            │
-│       ┌─────────────────┐            ┌─────────────────┐                    │
-│       │  Visible Image  │            │  Infrared Image │                    │
-│       │   (RGB/Gray)    │            │   (Thermal)     │                    │
-│       └────────┬────────┘            └────────┬────────┘                    │
-│                │                              │                             │
-│                └──────────────┬───────────────┘                             │
-│                               ▼                                             │
-│                ┌──────────────────────────────┐                             │
-│                │        VAE Encoder           │                             │
-│                │ (Variational Autoencoder)    │                             │
-│                │   (Image → Latent 64×64×4)   │                             │
-│                └──────────────┬───────────────┘                             │
-│                               │                                             │
-│              ┌────────────────┴────────────────┐                            │
-│              ▼                                 ▼                            │
-│    ┌───────────────────┐            ┌────────────────────────┐              │
-│    │  DDIM Inversion   │            │   DDIM Inversion       │              │
-│    │  (Denoising       │            │  (Denoising Diffusion  │              │
-│    │   Diffusion       │───────────▶│   Implicit Models)     │              │
-│    │   Implicit Models)│  guidance  │  + Visible Cues (λ)    │              │
-│    │     (VIS)         │            │        (IR)            │              │
-│    └─────────┬─────────┘            └───────────┬────────────┘              │
-│              │                                  │                           │
-│              │      ┌──────────────────┐        │                           │
-│              └─────▶│  Feature Memory  │◀───────┘                           │
-│                     │  ┌────────────┐  │                                    │
-│                     │  │ z_vis[t]   │  │                                    │
-│                     │  │ z_inf[t]   │  │                                    │
-│                     │  │ x_t_vis    │  │                                    │
-│                     │  │ x_t_inf    │  │                                    │
-│                     │  └────────────┘  │                                    │
-│                     └────────┬─────────┘                                    │
-│                              │                                              │
-│                              ▼                                              │
-│    ┌────────────────────────────────────────────────────────────────┐       │
-│    │            FUSION GENERATION (DDIM Denoising)                  │       │
-│    │      (Denoising Diffusion Implicit Models - Sampling)          │       │
-│    │  ╔════════════════════════════════════════════════════════╗    │       │
-│    │  ║  STAGE 1 (t > T1=70): IR Feature Injection             ║    │       │
-│    │  ║  → Inject infrared structural/thermal features         ║    │       │
-│    │  ╠════════════════════════════════════════════════════════╣    │       │
-│    │  ║  STAGE 2 (T2=40 < t ≤ T1): VIS Feature Refinement      ║    │       │
-│    │  ║  → Blend visible appearance and texture details        ║    │       │
-│    │  ╠════════════════════════════════════════════════════════╣    │       │
-│    │  ║  STAGE 3 (t ≤ T2): CFG Denoising                       ║    │       │
-│    │  ║  → CFG (Classifier-Free Guidance) for final refinement ║    │       │
-│    │  ╚════════════════════════════════════════════════════════╝    │       │
-│    └─────────────────────────┬──────────────────────────────────────┘       │
-│                              │                                              │
-│                              ▼                                              │
-│                   ┌────────────────────┐                                    │
-│                   │    VAE Decoder     │                                    │
-│                   │(Variational Auto-  │                                    │
-│                   │ encoder Decoder)   │                                    │
-│                   │ (Latent → Image)   │                                    │
-│                   └──────────┬─────────┘                                    │
-│                              │                                              │
-│                              ▼                                              │
-│                   ┌────────────────────┐                                    │
-│                   │    FUSED IMAGE     │                                    │
-│                   │  (Visible-Style)   │                                    │
-│                   │                    │                                    │
-│                   │ Compatible with:   │                                    │
-│                   │ • SAM, DINO, CLIP  │                                    │
-│                   │ • Object Detection │                                    │
-│                   │ • Segmentation     │                                    │
-│                   └────────────────────┘                                    │
+│  ┌─────────────────────────┐    ┌─────────────────────────┐                │
+│  │      Visible Image      │    │     Infrared Image      │                │
+│  │       (RGB Input)       │    │    (Thermal Input)      │                │
+│  └───────────┬─────────────┘    └───────────┬─────────────┘                │
+│              │                              │                              │
+│              ▼                              ▼                              │
+│  ┌─────────────────────┐        ┌─────────────────────┐                   │
+│  │   VIS Modality       │        │   IR Modality        │                   │
+│  │   Encoder            │        │   Encoder            │                   │
+│  │   (Multi-scale CNN)  │        │   (Multi-scale CNN)  │                   │
+│  │   4 resolution lvls  │        │   4 resolution lvls  │                   │
+│  └──┬──┬──┬──┬──────────┘        └──┬──┬──┬──┬──────────┘                   │
+│     │  │  │  │                      │  │  │  │                              │
+│     ▼  ▼  ▼  ▼                      ▼  ▼  ▼  ▼                              │
+│  ┌──────────────────────────────────────────────────────────┐               │
+│  │              ADAPTIVE FUSION (per-scale)                  │               │
+│  │  ╔════════════════════════════════════════════════════╗   │               │
+│  │  ║  Scale 0 (256x256): AdaptiveFusionGate            ║   │               │
+│  │  ║  Scale 1 (128x128): AdaptiveFusionGate            ║   │               │
+│  │  ║    → Conv gating: gate*IR + (1-gate)*VIS          ║   │               │
+│  │  ╠════════════════════════════════════════════════════╣   │               │
+│  │  ║  Scale 2 (64x64):  AdaptiveFusionAttention        ║   │               │
+│  │  ║  Scale 3 (32x32):  AdaptiveFusionAttention        ║   │               │
+│  │  ║    → Bidirectional cross-attention + gating        ║   │               │
+│  │  ╚════════════════════════════════════════════════════╝   │               │
+│  └──────────────────────┬───────────────────────────────────┘               │
+│                         │ Multi-scale fused condition features               │
+│                         ▼                                                    │
+│  ┌──────────────────────────────────────────────────────────┐               │
+│  │                 Denoising U-Net (~12.5M params)           │               │
+│  │  ┌────────────────────────────────────────────────────┐  │               │
+│  │  │ Encoder: [32, 64, 128, 256] channels               │  │               │
+│  │  │ Self-attention at 64x64 and 32x32                  │  │               │
+│  │  │ Sinusoidal timestep embeddings                     │  │               │
+│  │  │ Bottleneck: 16x16 with self-attention              │  │               │
+│  │  │ Decoder: Skip connections + condition injection    │  │               │
+│  │  └────────────────────────────────────────────────────┘  │               │
+│  │  Input: noisy image + scale-0 fused features             │               │
+│  │  Output: predicted noise                                  │               │
+│  └──────────────────────┬───────────────────────────────────┘               │
+│                         │                                                    │
+│                         ▼                                                    │
+│              ┌────────────────────┐                                          │
+│              │   DDIM Sampling    │                                          │
+│              │   (50 steps)       │                                          │
+│              │   + SDEdit from    │                                          │
+│              │   pseudo GT        │                                          │
+│              └──────────┬─────────┘                                          │
+│                         │                                                    │
+│                         ▼                                                    │
+│              ┌────────────────────┐                                          │
+│              │    FUSED IMAGE     │                                          │
+│              │  (Visible-Style)   │                                          │
+│              └────────────────────┘                                          │
 │                                                                             │
+│  TRAINING:                                                                  │
+│  ├── Dataset: M3FD (200 train / 100 test pairs)                             │
+│  ├── Pseudo GT: Visible-dominant blend (vis_weight=0.7)                     │
+│  ├── Loss: DDPM MSE with min-SNR weighting (gamma=5.0)                      │
+│  ├── Optimizer: AdamW (lr=2e-4, weight_decay=1e-4)                          │
+│  ├── Schedule: Linear warmup + cosine decay                                 │
+│  ├── EMA: decay=0.9999                                                      │
+│  └── AMP: Mixed precision on CUDA                                           │
+│                                                                             │
+│  INFERENCE:                                                                 │
+│  ├── SDEdit: Noise pseudo GT, then denoise with trained model               │
+│  ├── DDIM: 50 deterministic steps (eta=0)                                   │
+│  ├── Strength: 0.95 (start from high noise level)                           │
+│  └── Image size: 256x256                                                    │
+│                                                                             │
+│  KEY PARAMETERS:                                                            │
+│  ├── Total model params: ~17M                                               │
+│  ├── Diffusion timesteps: 1000 (linear beta schedule)                       │
+│  ├── DDIM sampling steps: 50                                                │
+│  └── Feature channels: [16, 32, 64, 128] (encoders)                        │
+│                         [32, 64, 128, 256] (U-Net)                          │
 └─────────────────────────────────────────────────────────────────────────────┘
-
-    REQUIRED COMPONENTS:
-    ├── Stable Diffusion v1.5:
-    │   ├── VAE (Variational Autoencoder) - Image ↔ Latent encoding
-    │   ├── U-Net - Denoising network (frozen weights)
-    │   └── CLIP - Text encoder for optional guidance
-    ├── TNO Dataset (Recommended benchmark for evaluation)
-    └── CUDA GPU (RTX 3090 recommended, ~21s inference)
-
-    KEY PARAMETERS:
-    ├── λ (lambda_vis) = 0.08  : Visible cues guidance strength
-    ├── T = 80                 : Total diffusion steps
-    ├── T1 = 70                : IR injection cutoff
-    └── T2 = 40                : VIS refinement cutoff
 ```
 
 ### How It Works
 
-1. **Input from TNO Dataset**: Load paired visible (RGB) and infrared (thermal) images from TNO benchmark dataset
-2. **Visible Inversion**: The visible image is inverted through DDIM to capture its noise trajectory `z_vis`
-3. **Infrared Inversion with Visible Cues**: The infrared image is inverted with guidance from visible features (controlled by `λ=0.08`)
-4. **Multi-Stage Fusion**: During denoising:
-   - **Stage 1 (t > T1=70)**: Inject IR structural/thermal features
-   - **Stage 2 (T2=40 < t ≤ T1)**: Refine with VIS appearance and texture
-   - **Stage 3 (t ≤ T2)**: CFG denoising for final detail enhancement
-5. **Output**: Visible-style fused image compatible with foundation models
-
-### Why TNO Dataset?
-
-| Reason | Description |
-|--------|-------------|
-| **Standard Benchmark** | Widely used for IR-VIS fusion evaluation |
-| **Paired Images** | Registered visible and infrared image pairs |
-| **Diverse Scenes** | Military, surveillance, outdoor scenarios |
-| **Ground Truth** | Enables quantitative comparison with SOTA methods |
+1. **Dual Modality Encoding**: Separate multi-scale CNN encoders extract features from IR and VIS images at 4 resolution levels
+2. **Adaptive Fusion**: Content-aware fusion merges IR and VIS features:
+   - **High-res (256x256, 128x128)**: Convolutional gating — learns spatially-varying blend weights
+   - **Low-res (64x64, 32x32)**: Bidirectional cross-attention + gating — IR attends to VIS and vice versa
+3. **Conditioned Denoising**: The fused multi-scale features condition a U-Net denoiser via skip-connection injection
+4. **SDEdit Refinement**: A pseudo ground-truth (visible-dominant blend) is partially noised, then refined by the diffusion model
+5. **Output**: Visible-style fused image preserving natural colors with enhanced IR detail
 
 ## Features
 
-- **Training-Free**: Uses pre-trained Stable Diffusion v1.5 directly
-- **Visible-Style Output**: Produces fused images compatible with foundation models (SAM, Grounding DINO)
-- **Text-Interactive**: Supports text-guided fusion control
-- **Fast Inference**: ~21s on RTX 3090 with BF16 precision
+- **Custom Lightweight Model**: ~17M parameters, trainable on a single GPU
+- **Adaptive Fusion Attention**: Content-aware gating + cross-attention at multiple scales
+- **SDEdit Inference**: Refines a pseudo GT for cleaner outputs than pure noise generation
+- **DDIM Fast Sampling**: 50-step deterministic sampling
+- **Min-SNR Loss Weighting**: Balanced training across noise levels
+- **EMA Weights**: Exponential moving average for stable inference
+- **M3FD Dataset Support**: Auto-detection, train/test splitting, data augmentation
 
-## 🔧 Installation
+## Installation
 
 ```bash
 # Create conda environment
@@ -147,105 +124,153 @@ conda activate fusioninv
 pip install -r requirements.txt
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
-### Single Image Pair
+### Complete Pipeline (Setup + Train + Test)
+```bash
+python run_all.py --source_dir /path/to/M3FD --epochs 100
+```
+
+### Step-by-Step
+
+#### 1. Setup M3FD Dataset
+```bash
+# From local M3FD folder
+python setup_m3fd.py --source_dir /path/to/M3FD
+
+# Or download from Google Drive
+python setup_m3fd.py --download
+```
+
+#### 2. Train
+```bash
+python run_train.py --epochs 500 --batch_size 4 --lr 2e-4
+```
+
+#### 3. Test
+```bash
+python run_test.py --checkpoint checkpoints/best.pt
+```
+
+### Single Image Pair Inference
 ```bash
 python fusioninv.py \
+    --checkpoint checkpoints/best.pt \
     --vis_image_path ./data/sample_vis.png \
     --ir_image_path ./data/sample_ir.png \
-    --output_path ./output \
-    --seed 42
+    --output_path ./output
 ```
 
-### TNO Dataset Batch Processing
+### Batch Processing (M3FD)
 ```bash
-# Process entire TNO dataset
 python fusioninv.py \
-    --tno_root ./data/tno \
-    --output_path ./output/tno_results \
-    --seed 42
-
-# Process specific range
-python fusioninv.py \
-    --tno_root ./data/tno \
-    --output_path ./output/tno_results \
-    --start_idx 0 \
-    --end_idx 10 \
-    --seed 42
+    --checkpoint checkpoints/best.pt \
+    --data_dir ./data/m3fd/test \
+    --output_path ./output/results
 ```
 
-### Alternative: Dedicated TNO Script
+### TNO Dataset Processing
 ```bash
 python process_tno.py \
     --tno_root ./data/tno \
-    --output_dir ./output/tno_results
+    --output_dir ./output/tno_results \
+    --checkpoint checkpoints/best.pt
 ```
 
-### Streamlit Demo
+## M3FD Dataset Setup
+
+1. Download M3FD dataset from [Google Drive](https://drive.google.com/drive/folders/1H-oO7bgRuVFYDcMGvxstT1nmy0WF_Y_6)
+2. Run setup to split into train/test:
 ```bash
-streamlit run app.py
+python setup_m3fd.py --source_dir /path/to/M3FD
 ```
 
-## 📥 TNO Dataset Setup
-
-1. Download TNO dataset from [Figshare](https://figshare.com/articles/dataset/TNO_Image_Fusion_Dataset/1008029)
-2. Organize the dataset:
+Expected structure after setup:
 ```
-data/tno/
-├── vis/           # Visible images
-│   ├── image1.png
-│   ├── image2.png
-│   └── ...
-└── ir/            # Infrared images (matching filenames)
-    ├── image1.png
-    ├── image2.png
-    └── ...
+data/m3fd/
+├── train/
+│   ├── vis/    # 200 visible images
+│   └── ir/     # 200 infrared images
+├── test/
+│   ├── vis/    # 100 visible images
+│   └── ir/     # 100 infrared images
+└── split_info.txt
 ```
 
-The loader auto-detects common directory names: `vis`/`VIS`/`visible`/`RGB` and `ir`/`IR`/`infrared`/`thermal`.
+The loader auto-detects common directory names: `vis`/`Vis`/`visible`/`RGB` and `ir`/`Ir`/`infrared`/`thermal`.
 
-## 📂 Project Structure
+## Project Structure
 
 ```
-FusionINV/
+AdaptiveDiffusionFusion/
 ├── models/
-│   ├── vae_encoder.py        # VAE latent space conversion
-│   ├── inversion.py          # DDPM inversion with visible cues
-│   ├── attention_hooks.py    # Self-attention K,V extraction
-│   └── fusion.py             # Appearance injection module
+│   ├── __init__.py              # Module exports
+│   ├── adaptive_unet.py         # Denoising U-Net (~12.5M params)
+│   ├── adaptive_diffusion.py    # DDPM/DDIM diffusion process
+│   └── adaptive_fusion_net.py   # Full model: encoders + fusion + U-Net
 ├── data/
-│   ├── tno_dataset.py        # TNO dataset loader
-│   └── tno/                  # TNO dataset (user-provided)
-├── output/                   # Generated outputs
-├── fusioninv.py              # Main pipeline
-├── process_tno.py            # TNO batch processing script
-├── app.py                    # Streamlit demo
+│   ├── m3fd_dataset.py          # M3FD dataset loader + train/test split
+│   └── tno_dataset.py           # TNO dataset loader
+├── checkpoints/                 # Trained model weights
+├── output/                      # Generated outputs
+├── fusioninv.py                 # Main inference pipeline
+├── process_tno.py               # TNO batch processing script
+├── run_train.py                 # Training script
+├── run_test.py                  # Testing + metrics script
+├── run_all.py                   # Complete pipeline (setup + train + test)
+├── setup_m3fd.py                # M3FD dataset download + split
+├── qual_metrics.py              # Standalone quality metrics computation
+├── create_pdf_report.py         # PDF report generation
 ├── requirements.txt
 └── README.md
 ```
 
-## ⚙️ Parameters
+## Parameters
 
-### Fusion Parameters
+### Training Parameters
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--lambda_vis` | 0.08 | Visible cues guidance strength |
-| `--num_steps` | 80 | Total diffusion steps |
-| `--t1` | 70 | IR injection cutoff step |
-| `--t2` | 40 | VIS refinement cutoff step |
-| `--guidance_scale` | 7.5 | Classifier-free guidance scale |
+| `--epochs` | 500 | Training epochs |
+| `--batch_size` | 4 | Batch size |
+| `--lr` | 2e-4 | Learning rate |
+| `--seed` | 42 | Random seed |
+| `--save_every` | 10 | Save checkpoint every N epochs |
+| `--sample_every` | 10 | Generate samples every N epochs |
 
-### TNO Dataset Parameters
+### Inference Parameters
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--tno_root` | None | Path to TNO dataset root |
-| `--vis_subdir` | vis | Visible images subdirectory |
-| `--ir_subdir` | ir | Infrared images subdirectory |
-| `--start_idx` | 0 | Start index for batch processing |
-| `--end_idx` | None | End index (None for all images) |
+| `--checkpoint` | checkpoints/best.pt | Path to trained model checkpoint |
+| `--ddim_steps` | 50 | DDIM sampling steps |
+| `--device` | cuda | Device (cuda or cpu) |
+| `--seed` | 42 | Random seed |
 
-## 📌 Citation
+### Model Architecture
+| Component | Channels | Description |
+|-----------|----------|-------------|
+| Modality Encoders | [16, 32, 64, 128] | Multi-scale feature extraction |
+| U-Net | [32, 64, 128, 256] | Denoising backbone |
+| Timestep Embedding | 256-dim | Sinusoidal + MLP |
+| Diffusion | 1000 steps | Linear beta schedule |
+
+## Quality Metrics
+
+The testing pipeline (`run_test.py`) computes these metrics:
+
+| Metric | Description |
+|--------|-------------|
+| MI (IR/VIS, F) | Mutual Information between source and fused |
+| SSIM (IR/VIS, F) | Structural Similarity Index |
+| CC (IR/VIS, F) | Correlation Coefficient |
+| EN | Shannon Entropy of fused image |
+| SD | Standard Deviation of fused image |
+| SF | Spatial Frequency |
+| AG | Average Gradient |
+| VIF (IR/VIS, F) | Visual Information Fidelity |
+
+## Citation
+
+This implementation is inspired by:
 
 ```bibtex
 @article{liang2025fusioninv,
@@ -258,12 +283,14 @@ FusionINV/
 }
 ```
 
-## 🙏 Acknowledgements
+**Note**: This is a re-implementation using a custom lightweight architecture (~17M params), not the original FusionINV which uses Stable Diffusion v1.5 (~1.1B params) in a training-free manner.
 
-- [Stable Diffusion v1.5](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5)
+## Acknowledgements
+
 - [Original FusionINV Paper](https://ieeexplore.ieee.org/document/11114795)
-- [Official Implementation](https://github.com/erfect2020/FusionINV)
+- [Official FusionINV Implementation](https://github.com/erfect2020/FusionINV)
+- [M3FD Dataset](https://drive.google.com/drive/folders/1H-oO7bgRuVFYDcMGvxstT1nmy0WF_Y_6)
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License.

@@ -1,6 +1,6 @@
 """
 Batch Processing Script for TNO Dataset
-Processes all image pairs from TNO dataset using FusionINV
+Processes all image pairs from TNO dataset using Adaptive Diffusion Fusion.
 """
 import os
 import argparse
@@ -9,20 +9,16 @@ from pathlib import Path
 from tqdm import tqdm
 from datetime import datetime
 
-from fusioninv import FusionINV
+from fusioninv import AdaptiveDiffusionFusion
 from data.tno_dataset import TNODataset, download_tno_info
 
 
 def process_tno_dataset(
     tno_root: str,
     output_dir: str,
-    model_path: str = None,
+    checkpoint: str = None,
     device: str = "cuda",
-    lambda_vis: float = 0.08,
-    num_steps: int = 80,
-    t1: int = 70,
-    t2: int = 40,
-    guidance_scale: float = 7.5,
+    ddim_steps: int = 50,
     seed: int = None,
     start_idx: int = 0,
     end_idx: int = None,
@@ -30,24 +26,30 @@ def process_tno_dataset(
     ir_subdir: str = "ir"
 ):
     """
-    Process TNO dataset with FusionINV.
+    Process TNO dataset with Adaptive Diffusion Fusion.
 
     Args:
         tno_root: Path to TNO dataset root directory
         output_dir: Output directory for fused images
-        model_path: Optional local path to SD v1.5 model
+        checkpoint: Path to trained model checkpoint
         device: Device to use (cuda/cpu)
-        lambda_vis: Visible cues strength
-        num_steps: Number of diffusion steps
-        t1: IR injection cutoff step
-        t2: VIS refinement cutoff step
-        guidance_scale: CFG guidance scale
+        ddim_steps: Number of DDIM sampling steps
         seed: Random seed for reproducibility
         start_idx: Starting index for processing
         end_idx: Ending index (None for all)
         vis_subdir: Subdirectory name for visible images
         ir_subdir: Subdirectory name for infrared images
     """
+    # Resolve checkpoint path
+    if checkpoint is None:
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        checkpoint = os.path.join(project_root, "checkpoints", "best.pt")
+
+    if not os.path.exists(checkpoint):
+        print(f"Error: Checkpoint not found: {checkpoint}")
+        print("Train the model first: python run_train.py")
+        return
+
     # Create output directory
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -56,9 +58,6 @@ def process_tno_dataset(
     if device == "cuda" and not torch.cuda.is_available():
         print("CUDA not available, falling back to CPU")
         device = "cpu"
-        dtype = torch.float32
-    else:
-        dtype = torch.bfloat16
 
     # Load TNO dataset
     print(f"\nLoading TNO dataset from: {tno_root}")
@@ -67,7 +66,7 @@ def process_tno_dataset(
             root_dir=tno_root,
             vis_subdir=vis_subdir,
             ir_subdir=ir_subdir,
-            image_size=(512, 512)
+            image_size=(256, 256)
         )
     except FileNotFoundError as e:
         print(f"\nError: {e}")
@@ -85,23 +84,15 @@ def process_tno_dataset(
 
     print(f"Processing images {start_idx} to {end_idx - 1}")
 
-    # Initialize FusionINV
+    # Initialize Adaptive Diffusion Fusion
     print("\n" + "=" * 60)
-    print("Initializing FusionINV...")
+    print("Initializing Adaptive Diffusion Fusion...")
     print("=" * 60)
 
-    fusioninv = FusionINV(
+    fusion = AdaptiveDiffusionFusion(
+        checkpoint_path=checkpoint,
         device=device,
-        dtype=dtype,
-        local_model_path=model_path
-    )
-
-    # Set parameters
-    fusioninv.set_params(
-        lambda_vis=lambda_vis,
-        num_steps=num_steps,
-        T1=t1,
-        T2=t2
+        ddim_steps=ddim_steps,
     )
 
     # Process images
@@ -114,7 +105,6 @@ def process_tno_dataset(
 
     for idx in tqdm(range(start_idx, end_idx), desc="Processing TNO"):
         try:
-            # Get image pair
             pair = dataset[idx]
             vis_path = pair['vis_path']
             ir_path = pair['ir_path']
@@ -124,11 +114,9 @@ def process_tno_dataset(
             current_seed = seed + idx if seed is not None else None
 
             # Run fusion
-            fused_image = fusioninv.fuse(
+            fused_image = fusion.fuse(
                 vis_image_path=vis_path,
                 ir_image_path=ir_path,
-                prompt="",
-                guidance_scale=guidance_scale,
                 seed=current_seed,
                 verbose=False
             )
@@ -168,12 +156,10 @@ def process_tno_dataset(
         f.write(f"Generated: {datetime.now().isoformat()}\n")
         f.write(f"=" * 50 + "\n\n")
         f.write(f"Parameters:\n")
-        f.write(f"  lambda_vis: {lambda_vis}\n")
-        f.write(f"  num_steps: {num_steps}\n")
-        f.write(f"  T1: {t1}\n")
-        f.write(f"  T2: {t2}\n")
-        f.write(f"  guidance_scale: {guidance_scale}\n")
-        f.write(f"  seed: {seed}\n\n")
+        f.write(f"  checkpoint: {checkpoint}\n")
+        f.write(f"  ddim_steps: {ddim_steps}\n")
+        f.write(f"  seed: {seed}\n")
+        f.write(f"  device: {device}\n\n")
         f.write(f"Results:\n")
         f.write(f"  Processed: {len(results)}\n")
         f.write(f"  Failed: {len(failed)}\n\n")
@@ -187,10 +173,9 @@ def process_tno_dataset(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Process TNO dataset with FusionINV"
+        description="Process TNO dataset with Adaptive Diffusion Fusion"
     )
 
-    # Required arguments
     parser.add_argument(
         "--tno_root",
         type=str,
@@ -203,13 +188,11 @@ def main():
         required=True,
         help="Output directory for fused images"
     )
-
-    # Optional arguments
     parser.add_argument(
-        "--model_path",
+        "--checkpoint",
         type=str,
         default=None,
-        help="Local path to SD v1.5 model"
+        help="Path to trained model checkpoint (default: checkpoints/best.pt)"
     )
     parser.add_argument(
         "--device",
@@ -218,34 +201,10 @@ def main():
         help="Device (cuda/cpu)"
     )
     parser.add_argument(
-        "--lambda_vis",
-        type=float,
-        default=0.08,
-        help="Visible cues strength (default: 0.08)"
-    )
-    parser.add_argument(
-        "--num_steps",
+        "--ddim_steps",
         type=int,
-        default=80,
-        help="Diffusion steps (default: 80)"
-    )
-    parser.add_argument(
-        "--t1",
-        type=int,
-        default=70,
-        help="IR injection cutoff (default: 70)"
-    )
-    parser.add_argument(
-        "--t2",
-        type=int,
-        default=40,
-        help="VIS refinement cutoff (default: 40)"
-    )
-    parser.add_argument(
-        "--guidance_scale",
-        type=float,
-        default=7.5,
-        help="CFG scale (default: 7.5)"
+        default=50,
+        help="DDIM sampling steps (default: 50)"
     )
     parser.add_argument(
         "--seed",
@@ -283,13 +242,9 @@ def main():
     process_tno_dataset(
         tno_root=args.tno_root,
         output_dir=args.output_dir,
-        model_path=args.model_path,
+        checkpoint=args.checkpoint,
         device=args.device,
-        lambda_vis=args.lambda_vis,
-        num_steps=args.num_steps,
-        t1=args.t1,
-        t2=args.t2,
-        guidance_scale=args.guidance_scale,
+        ddim_steps=args.ddim_steps,
         seed=args.seed,
         start_idx=args.start_idx,
         end_idx=args.end_idx,
