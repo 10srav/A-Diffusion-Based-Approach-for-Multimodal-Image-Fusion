@@ -237,7 +237,7 @@ class AdaptiveDDIMSampler:
         info = {
             'num_steps': n_steps,
             'complexity_scalar': complexity_scalar.squeeze(-1).cpu().tolist(),
-            'adaptive_strength': strength if start_image else None,
+            'adaptive_strength': strength if start_image is not None else None,
             'eta_mean': eta.mean().item(),
             'mode': 'pixel',
         }
