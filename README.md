@@ -113,58 +113,93 @@ Inspired by [FusionINV](https://ieeexplore.ieee.org/document/11114795) (IEEE TIP
 - **EMA Weights**: Exponential moving average for stable inference
 - **M3FD Dataset Support**: Auto-detection, train/test splitting, data augmentation
 
-## Installation
+## Getting Started (Step-by-Step)
+
+Follow these steps one by one in your terminal.
+
+### Step 1: Clone the Repository
 
 ```bash
-# Create conda environment
-conda create -n fusioninv python=3.9
-conda activate fusioninv
+git clone https://github.com/10srav/A-Diffusion-Based-Approach-for-Multimodal-Image-Fusion.git
+cd A-Diffusion-Based-Approach-for-Multimodal-Image-Fusion
+```
 
-# Install dependencies
+### Step 2: Install Git LFS
+
+The model checkpoint files are large and stored with Git LFS. You need to install it first:
+
+```bash
+# Ubuntu/Debian:
+sudo apt install git-lfs
+
+# macOS:
+brew install git-lfs
+
+# Windows: download installer from https://git-lfs.com
+```
+
+Then pull the model weights:
+
+```bash
+git lfs install
+git lfs pull
+```
+
+> This will download ~1.8 GB of model checkpoints. Make sure you have enough disk space.
+
+### Step 3: Create Python Environment
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Quick Start
+> **Windows users:** use `venv\Scripts\activate` instead of `source venv/bin/activate`
 
-### Complete Pipeline (Setup + Train + Test)
+You can also use conda:
+
 ```bash
-python run_all.py --source_dir /path/to/M3FD --epochs 100
+conda create -n fusioninv python=3.9
+conda activate fusioninv
+pip install -r requirements.txt
 ```
 
-### Step-by-Step
+### Step 4: Setup M3FD Dataset
 
-#### 1. Setup M3FD Dataset
+Download the [M3FD dataset](https://drive.google.com/drive/folders/1H-oO7bgRuVFYDcMGvxstT1nmy0WF_Y_6) and then run:
+
 ```bash
-# From local M3FD folder
 python setup_m3fd.py --source_dir /path/to/M3FD
-
-# Or download from Google Drive
-python setup_m3fd.py --download
 ```
 
-#### 2. Train
+> Replace `/path/to/M3FD` with the actual folder where you downloaded M3FD.
+
+### Step 5: Run Testing (Adaptive Model)
+
 ```bash
-python run_train.py --epochs 500 --batch_size 4 --lr 2e-4
+python run_test.py --adaptive
 ```
 
-#### 3. Test
-```bash
-python run_test.py --checkpoint checkpoints/best.pt
-```
+> This uses the best adaptive checkpoint (`checkpoints/adaptive_best.pt`) and saves results to `output/test_results/`.
 
-### Single Image Pair Inference
+### Step 6: Fuse a Single Image Pair
+
 ```bash
 python fusioninv.py \
-    --checkpoint checkpoints/best.pt \
+    --checkpoint checkpoints/adaptive_best.pt \
     --vis_image_path ./data/sample_vis.png \
     --ir_image_path ./data/sample_ir.png \
     --output_path ./output
 ```
 
-### Batch Processing (M3FD)
+> The fused image will be saved in the `output/` folder.
+
+### Step 7: Batch Process All Test Images
+
 ```bash
 python fusioninv.py \
-    --checkpoint checkpoints/best.pt \
+    --checkpoint checkpoints/adaptive_best.pt \
     --data_dir ./data/m3fd/test \
     --output_path ./output/results
 ```
@@ -174,7 +209,7 @@ python fusioninv.py \
 python process_tno.py \
     --tno_root ./data/tno \
     --output_dir ./output/tno_results \
-    --checkpoint checkpoints/best.pt
+    --checkpoint checkpoints/adaptive_best.pt
 ```
 
 ## M3FD Dataset Setup
