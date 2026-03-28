@@ -123,7 +123,7 @@ class AdaptiveTimestepSelector(nn.Module):
         step_frac = self.step_predictor(content_descriptor).squeeze(-1)  # [B]
         num_steps = (self.min_steps +
                      step_frac * (self.max_steps - self.min_steps))
-        num_steps = num_steps.round().long().clamp(self.min_steps, self.max_steps)
+        num_steps = num_steps.round().long()
 
         density_logits = self.density_predictor(content_descriptor)
         timestep_density = F.softmax(density_logits, dim=-1)  # [B, num_anchor_bins]

@@ -151,6 +151,8 @@ def run_testing(
     start_idx=0,
     end_idx=None,
     skip_fusion=False,
+    min_steps=None,
+    max_steps=None,
 ):
     """
     Process M3FD test set (100 images) and compute quality metrics.
@@ -221,6 +223,8 @@ def run_testing(
             checkpoint_path=checkpoint,
             device=device,
             ddim_steps=ddim_steps,
+            min_steps=min_steps,
+            max_steps=max_steps,
         )
 
         for idx in tqdm(range(start_idx, end_idx), desc="Test Fusion"):
@@ -372,6 +376,10 @@ def main():
                         help="Skip fusion, only compute metrics on existing outputs")
     parser.add_argument("--adaptive", action="store_true",
                         help="Use adaptive diffusion checkpoint (adaptive_best.pt)")
+    parser.add_argument("--min_steps", type=int, default=None,
+                        help="Minimum adaptive DDIM steps (default: no limit)")
+    parser.add_argument("--max_steps", type=int, default=None,
+                        help="Maximum adaptive DDIM steps (default: no limit)")
 
     args = parser.parse_args()
 
@@ -390,6 +398,8 @@ def main():
         start_idx=args.start_idx,
         end_idx=args.end_idx,
         skip_fusion=args.skip_fusion,
+        min_steps=args.min_steps,
+        max_steps=args.max_steps,
     )
 
 

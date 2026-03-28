@@ -43,10 +43,14 @@ class AdaptiveDiffusionFusion:
         device: str = "cuda",
         ddim_steps: int = 50,
         image_size: int = 256,
+        min_steps: Optional[int] = None,
+        max_steps: Optional[int] = None,
     ):
         self.device = device
         self.ddim_steps = ddim_steps
         self.image_size = image_size
+        self.min_steps = min_steps
+        self.max_steps = max_steps
 
         if device == "cuda" and not torch.cuda.is_available():
             print("CUDA not available, falling back to CPU")
@@ -99,7 +103,12 @@ class AdaptiveDiffusionFusion:
         if self.version >= 2:
             print("  Loading adaptive diffusion modules...")
             ca = ContentAnalyzer(descriptor_dim=64).to(self.device)
-            ts = AdaptiveTimestepSelector(descriptor_dim=64).to(self.device)
+            ts_kwargs = {'descriptor_dim': 64}
+            if self.min_steps is not None:
+                ts_kwargs['min_steps'] = self.min_steps
+            if self.max_steps is not None:
+                ts_kwargs['max_steps'] = self.max_steps
+            ts = AdaptiveTimestepSelector(**ts_kwargs).to(self.device)
             ns = ContentAdaptiveNoiseSchedule(descriptor_dim=64).to(self.device)
 
             ca.load_state_dict(ckpt['content_analyzer_state_dict'])
@@ -304,6 +313,10 @@ def main():
                         help="Random seed")
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device: cuda or cpu")
+    parser.add_argument("--min_steps", type=int, default=None,
+                        help="Minimum adaptive DDIM steps (default: no limit)")
+    parser.add_argument("--max_steps", type=int, default=None,
+                        help="Maximum adaptive DDIM steps (default: no limit)")
 
     args = parser.parse_args()
 
@@ -320,6 +333,8 @@ def main():
         checkpoint_path=args.checkpoint,
         device=args.device,
         ddim_steps=args.ddim_steps,
+        min_steps=args.min_steps,
+        max_steps=args.max_steps,
     )
 
     if args.data_dir is not None:

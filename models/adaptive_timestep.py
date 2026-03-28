@@ -29,8 +29,10 @@ class AdaptiveTimestep:
         device: Torch device (used only for input tensor conversion)
     """
 
-    def __init__(self, T=50, device="cuda"):
+    def __init__(self, T=50, min_t=None, max_t=None, device="cuda"):
         self.T = T
+        self.min_t = min_t if min_t is not None else 0
+        self.max_t = max_t if max_t is not None else T - 1
         self.device = device
 
     def _to_gray(self, tensor):
@@ -185,7 +187,7 @@ class AdaptiveTimestep:
             return_details: if True, also return per-metric breakdown
 
         Returns:
-            t: int, selected timestep in [3, T-3]
+            t: int, selected timestep in [min_t, max_t] (default [0, T-1])
             details: dict (only if return_details=True) with all metric
                      values and the composite score
         """
@@ -237,9 +239,9 @@ class AdaptiveTimestep:
 
         score = float(np.clip(stretched, 0, 1))
 
-        # Map to timestep
+        # Map to timestep (full range, no artificial clamping)
         t = int(score * (self.T - 1))
-        t = max(3, min(self.T - 3, t))
+        t = max(self.min_t, min(self.max_t, t))
 
         if return_details:
             details = {
