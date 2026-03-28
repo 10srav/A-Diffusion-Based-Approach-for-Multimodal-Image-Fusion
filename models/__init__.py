@@ -13,6 +13,7 @@ from .content_analyzer import (
 from .feature_memory import FeatureMemoryBank, DualModalityFeatureMemory
 from .ddim_inversion import DDIMInversion
 from .adaptive_sampler import AdaptiveDDIMSampler
+from .adaptive_timestep import AdaptiveTimestep
 from .vae import FusionVAE, VAEEncoder, VAEDecoder
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     'DualModalityFeatureMemory',
     'DDIMInversion',
     'AdaptiveDDIMSampler',
+    'AdaptiveTimestep',
     'FusionVAE',
     'VAEEncoder',
     'VAEDecoder',
